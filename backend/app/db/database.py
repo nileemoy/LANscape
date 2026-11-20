@@ -7,7 +7,8 @@ BASE_DIR = Path(__file__).resolve().parent.parent.parent.parent
 DATA_DIR = BASE_DIR / "data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-DB_PATH = os.environ.get("HOMENET_DB_PATH", str(DATA_DIR / "homenet.db"))
+default_db = DATA_DIR / "lanscape.db" if (DATA_DIR / "lanscape.db").exists() or not (DATA_DIR / "homenet.db").exists() else DATA_DIR / "homenet.db"
+DB_PATH = os.environ.get("LANSCAPE_DB_PATH", os.environ.get("HOMENET_DB_PATH", str(default_db)))
 DATABASE_URL = f"sqlite:///{DB_PATH}"
 
 engine = create_engine(

@@ -9,7 +9,7 @@ router = APIRouter(tags=["health"])
 def get_health():
     return {
         "status": "ok",
-        "application": "HomeNet",
+        "application": "LANscape",
         "version": "0.1.0",
         "timestamp": datetime.utcnow().isoformat()
     }

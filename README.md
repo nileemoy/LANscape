@@ -1,8 +1,8 @@
-# HomeNet 🌐
+# LANscape 🌐
 
 > A lightweight, local-first network monitoring dashboard and interactive Wi-Fi floor-plan heatmap for home networks.
 
-HomeNet continuously observes your local area network (LAN), tracks router reachability, graphs real-time ping latency, and visualizes connected devices across an interactive floor-plan map with physical Wi-Fi signal attenuation modeling.
+LANscape continuously observes your local area network (LAN), tracks router reachability, graphs real-time ping latency, and visualizes connected devices across an interactive floor-plan map with physical Wi-Fi signal attenuation modeling.
 
 ---
 
@@ -57,9 +57,9 @@ Open `http://localhost:3000` in your browser.
 Copy `backend/.env.example` to `backend/.env` to customize settings:
 
 ```env
-HOMENET_HOST=127.0.0.1
-HOMENET_PORT=8000
-HOMENET_ROUTER_IP=192.168.1.1
+LANSCAPE_HOST=127.0.0.1
+LANSCAPE_PORT=8000
+LANSCAPE_ROUTER_IP=192.168.1.1
 ```
 
 ---
@@ -67,4 +67,3 @@ HOMENET_ROUTER_IP=192.168.1.1
 ## 📄 License
 
 This project is open-source under the MIT License.
-

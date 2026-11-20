@@ -87,7 +87,8 @@ export default function App() {
   // New: Theme & Wi-Fi Heatmap State
   const [isDark, setIsDark] = useState<boolean>(() => {
     try {
-      return localStorage.getItem('homenet_theme') === 'dark';
+      const saved = localStorage.getItem('lanscape_theme') || localStorage.getItem('homenet_theme');
+      return saved === 'dark';
     } catch {
       return false;
     }
@@ -99,7 +100,7 @@ export default function App() {
     setIsDark(prev => {
       const next = !prev;
       try {
-        localStorage.setItem('homenet_theme', next ? 'dark' : 'light');
+        localStorage.setItem('lanscape_theme', next ? 'dark' : 'light');
       } catch {}
       return next;
     });
@@ -311,7 +312,7 @@ export default function App() {
             {mobileMenuOpen ? <X className="w-5 h-5 stroke-[2.5]" /> : <Menu className="w-5 h-5 stroke-[2.5]" />}
           </button>
           <div className="flex items-center space-x-1.5">
-            <span className={`text-xl font-black ${isDark ? 'text-white' : 'text-[#1E2360]'}`}>HomeNet</span>
+            <span className={`text-xl font-black ${isDark ? 'text-white' : 'text-[#1E2360]'}`}>LANscape</span>
             <span className={`text-[10px] font-extrabold px-2 py-0.5 rounded-full border ${
               isDark ? 'bg-[#291730] border-[#F472B6] text-[#F472B6]' : 'bg-[#FFF0F4] border-[#F06292] text-[#F06292]'
             }`}>
@@ -367,7 +368,7 @@ export default function App() {
               }`}>
                 <Wifi className="w-5 h-5 stroke-[2.5]" />
               </div>
-              <h2 className={`text-xl font-black ${isDark ? 'text-white' : 'text-[#1E2360]'}`}>HomeNet</h2>
+              <h2 className={`text-xl font-black ${isDark ? 'text-white' : 'text-[#1E2360]'}`}>LANscape</h2>
             </div>
             <button
               onClick={() => setMobileMenuOpen(false)}
@@ -420,7 +421,7 @@ export default function App() {
             }`}>
               <Wifi className="w-8 h-8 stroke-[2.5]" />
             </div>
-            <h1 className={`text-2xl font-black tracking-tight ${isDark ? 'text-white' : 'text-[#1E2360]'}`}>HomeNet</h1>
+            <h1 className={`text-2xl font-black tracking-tight ${isDark ? 'text-white' : 'text-[#1E2360]'}`}>LANscape</h1>
             <span className="text-xs font-bold text-[#F06292] tracking-wider uppercase">Local Network</span>
           </div>
 
@@ -568,7 +569,7 @@ export default function App() {
               <div>
                 <h4 className="font-black text-[#DC2626] text-sm uppercase">Router Gateway (192.168.1.1) Unreachable</h4>
                 <p className="text-xs font-bold text-[#991B1B]">
-                  Your Zyxel ONT is turned off or disconnected. HomeNet remains accessible because it runs on your laptop&apos;s loopback (127.0.0.1).
+                  Your Zyxel ONT is turned off or disconnected. LANscape remains accessible because it runs on your laptop&apos;s loopback (127.0.0.1).
                 </p>
               </div>
             </div>

@@ -9,9 +9,9 @@ from app.api.routes_traffic import router as traffic_router
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI(
-    title="HomeNet API",
+    title="LANscape API",
     version="0.1.0",
-    description="Home network monitoring, device discovery, and telemetry platform."
+    description="Local area network monitoring, device discovery, and floor-plan telemetry platform."
 )
 
 # CORS middleware for frontend development
@@ -32,7 +32,7 @@ app.include_router(traffic_router, prefix="/api")
 @app.get("/")
 def root():
     return {
-        "message": "Welcome to HomeNet API",
+        "message": "Welcome to LANscape API",
         "docs_url": "/docs",
         "health_url": "/api/health"
     }
