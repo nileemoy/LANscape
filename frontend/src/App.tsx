@@ -20,7 +20,16 @@ import {
   Signal,
   Move,
   RotateCcw,
-  MapPin
+  MapPin,
+  Zap,
+  Layers,
+  Compass,
+  Crosshair,
+  PenTool,
+  Plus,
+  Trash2,
+  Undo,
+  Check
 } from 'lucide-react';
 import {
   HealthStatus,
@@ -31,50 +40,93 @@ import {
   TrafficSampleData
 } from './types';
 
-// Predefined floor plan room slots
-const ROOM_SLOTS = [
-  { id: 'laptop_room', x: 430, y: 395, room: 'LAPTOP ROOM', type: 'laptop' },
-  { id: 'tv_lounge', x: 535, y: 140, room: 'TV LOUNGE', type: 'tv' },
-  { id: 'bedroom_1', x: 195, y: 120, room: 'BEDROOM 1', type: 'phone' },
-  { id: 'bedroom_2', x: 130, y: 310, room: 'BEDROOM 2', type: 'phone' },
-  { id: 'kitchen', x: 360, y: 75, room: 'KITCHEN', type: 'phone' },
-  { id: 'corridor', x: 635, y: 260, room: 'CORRIDOR', type: 'generic' },
+// Floor Plan Custom Wall Geometry & Defaults
+export interface WallSegment {
+  id: string;
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+}
+
+// Starter floor plan: clean open perimeter with partition walls
+const DEFAULT_STARTER_WALLS: WallSegment[] = [
+  { id: 'w_bed1_v',  x1: 270, y1: 45,  x2: 270, y2: 230 },
+  { id: 'w_bed_h',   x1: 60,  y1: 230, x2: 270, y2: 230 },
+  { id: 'w_kitchen', x1: 520, y1: 45,  x2: 520, y2: 200 },
+  { id: 'w_office_v', x1: 520, y1: 300, x2: 520, y2: 455 },
+  { id: 'w_office_h', x1: 340, y1: 310, x2: 520, y2: 310 },
 ];
 
-// Preset rooms for quick device relocation
-const PRESET_ROOMS = [
-  { id: 'laptop_room', name: 'Work Desk', x: 430, y: 395, icon: '💻' },
-  { id: 'tv_lounge',   name: 'TV Lounge', x: 535, y: 140, icon: '📺' },
-  { id: 'kitchen',     name: 'Kitchen',   x: 360, y: 75,  icon: '🍳' },
-  { id: 'bedroom_1',   name: 'Bedroom 1', x: 195, y: 120, icon: '🛏️' },
-  { id: 'bedroom_2',   name: 'Bedroom 2', x: 130, y: 310, icon: '🚪' },
-  { id: 'corridor',    name: 'Corridor',  x: 635, y: 260, icon: '🚶' },
-  { id: 'living_room', name: 'Near Router', x: 390, y: 230, icon: '🛋️' },
+const DEFAULT_CLIENT_SLOTS = [
+  { id: 'slot_laptop', x: 430, y: 390, label: 'Work Area', type: 'laptop' },
+  { id: 'slot_tv',     x: 650, y: 150, label: 'TV Lounge', type: 'tv' },
+  { id: 'slot_phone1', x: 170, y: 130, label: 'Bedroom 1', type: 'phone' },
+  { id: 'slot_phone2', x: 170, y: 340, label: 'Bedroom 2', type: 'phone' },
+  { id: 'slot_phone3', x: 380, y: 110, label: 'Kitchen',   type: 'phone' },
+  { id: 'slot_other',  x: 650, y: 360, label: 'Balcony',   type: 'generic' },
 ];
 
-// Physical Wi-Fi signal propagation model (attenuation through distance + interior walls)
-const getSignalAtCoord = (x: number, y: number, is5G: boolean = true) => {
-  const dx = x - 330;
-  const dy = y - 230;
+// Check if a line segment (rx, ry) -> (tx, ty) intersects wall (x1, y1) -> (x2, y2)
+function checkWallIntersection(
+  rx: number, ry: number,
+  tx: number, ty: number,
+  x1: number, y1: number,
+  x2: number, y2: number
+): boolean {
+  const s1_x = tx - rx;
+  const s1_y = ty - ry;
+  const s2_x = x2 - x1;
+  const s2_y = y2 - y1;
+
+  const det = -s2_x * s1_y + s1_x * s2_y;
+  if (Math.abs(det) < 0.0001) return false;
+
+  const s = (-s1_y * (rx - x1) + s1_x * (ry - y1)) / det;
+  const t = ( s2_x * (ry - y1) - s2_y * (rx - x1)) / det;
+
+  return (s > 0.02 && s < 0.98 && t >= 0 && t <= 1);
+}
+
+// Physical Wi-Fi signal propagation model taking custom user walls into account
+const getSignalAtCoord = (
+  x: number,
+  y: number,
+  is5G: boolean = true,
+  routerX: number = 330,
+  routerY: number = 230,
+  customWalls: WallSegment[] = []
+) => {
+  const dx = x - routerX;
+  const dy = y - routerY;
   const distPx = Math.sqrt(dx * dx + dy * dy);
   const distMeters = Math.max(0.5, distPx / 55).toFixed(1);
+
+  // Count how many custom user walls intersect the direct RF transmission path
+  const wallsCrossed = customWalls.filter(w =>
+    checkWallIntersection(routerX, routerY, x, y, w.x1, w.y1, w.x2, w.y2)
+  ).length;
 
   // Path loss model with logarithmic distance decay
   const baseLoss = is5G
     ? 20 * Math.log10(Math.max(14, distPx) / 16)
     : 16 * Math.log10(Math.max(14, distPx) / 16);
 
-  // Spatial wall attenuation penalties:
-  let wallPenalty = 0;
-  if (x < 270) wallPenalty += (is5G ? 7 : 4);
-  if (x < 140) wallPenalty += (is5G ? 6 : 3);
-  if (y > 350 && x >= 330 && x <= 560) wallPenalty += (is5G ? 5 : 2.5);
-  if (y < 140 && x > 250 && x < 540) wallPenalty += (is5G ? 4 : 2);
-  if (x > 560) wallPenalty += (is5G ? 6 : 3);
+  // Each user-drawn wall imposes real physical RF attenuation
+  const wallPenalty = wallsCrossed * (is5G ? 6.5 : 4.0);
 
   const rawRssi = (is5G ? -36 : -32) - baseLoss - wallPenalty;
   const rssi = Math.max(-90, Math.min(-34, Math.round(rawRssi)));
   const percent = Math.min(100, Math.max(12, Math.round(((rssi + 95) / 55) * 100)));
+
+  // Realistic Wi-Fi throughput estimation
+  let estimatedSpeedMbps = 15;
+  if (rssi >= -48) estimatedSpeedMbps = is5G ? 280 : 95;
+  else if (rssi >= -58) estimatedSpeedMbps = is5G ? 190 : 75;
+  else if (rssi >= -67) estimatedSpeedMbps = is5G ? 120 : 55;
+  else if (rssi >= -75) estimatedSpeedMbps = is5G ? 60 : 35;
+  else if (rssi >= -82) estimatedSpeedMbps = is5G ? 25 : 15;
+  else estimatedSpeedMbps = is5G ? 8 : 4;
 
   let quality: 'Excellent' | 'Good' | 'Fair' | 'Weak' = 'Good';
   let color = '#22C55E';
@@ -92,22 +144,22 @@ const getSignalAtCoord = (x: number, y: number, is5G: boolean = true) => {
     color = '#EF4444';
   }
 
-  return { rssi, percent, quality, color, distPx: Math.round(distPx), distMeters };
+  return { rssi, percent, quality, color, distPx: Math.round(distPx), distMeters, estimatedSpeedMbps, wallsCrossed };
 };
 
 const getRoomNameAtCoord = (x: number, y: number): string => {
-  if (y > 340 && x >= 330 && x <= 560) return 'Laptop Room';
-  if (x >= 530 && y <= 210) return 'TV Lounge';
-  if (x <= 270 && y <= 220) return 'Bedroom 1';
-  if (x <= 270 && y > 220) return 'Bedroom 2';
-  if (y <= 150 && x > 260 && x < 530) return 'Kitchen';
-  if (x > 560) return 'Corridor / Balcony';
-  return 'Living Room (Central)';
+  if (x < 270 && y < 235) return 'Bedroom 1';
+  if (x < 270 && y >= 235) return 'Bedroom 2';
+  if (x >= 270 && x <= 520 && y < 200) return 'Kitchen / Dining';
+  if (x >= 270 && x <= 520 && y >= 310) return 'Work Office';
+  if (x > 520 && y < 250) return 'TV Lounge';
+  if (x > 520 && y >= 250) return 'Balcony / Hall';
+  return 'Living Room';
 };
 
 // Backwards compatibility wrapper
 const getSlotSignal = (slotId: string, is5G: boolean = true) => {
-  const slot = ROOM_SLOTS.find(s => s.id === slotId) || ROOM_SLOTS[0];
+  const slot = DEFAULT_CLIENT_SLOTS.find(s => s.id === slotId) || DEFAULT_CLIENT_SLOTS[0];
   return getSignalAtCoord(slot.x, slot.y, is5G);
 };
 
@@ -135,6 +187,35 @@ export default function App() {
   const [showHeatmap, setShowHeatmap] = useState<boolean>(false);
   const [heatmapBand, setHeatmapBand] = useState<'5ghz' | '2.4ghz'>('5ghz');
 
+  // Custom Floor Plan Walls & Wall Designer State
+  const [walls, setWalls] = useState<WallSegment[]>(() => {
+    try {
+      const saved = localStorage.getItem('lanscape_walls');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      }
+    } catch {}
+    return DEFAULT_STARTER_WALLS;
+  });
+
+  const [isWallBuilderOpen, setIsWallBuilderOpen] = useState(false);
+  const [drawingStart, setDrawingStart] = useState<{ x: number; y: number } | null>(null);
+  const [drawingCurrent, setDrawingCurrent] = useState<{ x: number; y: number } | null>(null);
+  const [hoveredWallId, setHoveredWallId] = useState<string | null>(null);
+
+  const [routerPos, setRouterPos] = useState<{ x: number; y: number }>(() => {
+    try {
+      const saved = localStorage.getItem('lanscape_router_pos');
+      return saved ? JSON.parse(saved) : { x: 330, y: 230 };
+    } catch {
+      return { x: 330, y: 230 };
+    }
+  });
+
+  const [showSpeedInspector, setShowSpeedInspector] = useState<boolean>(false);
+  const [hoverProbe, setHoverProbe] = useState<{ x: number; y: number; visible: boolean }>({ x: 0, y: 0, visible: false });
+
   // Interactive Floor Plan Device Placement & Dragging
   const svgRef = useRef<SVGSVGElement | null>(null);
   const [customLocations, setCustomLocations] = useState<Record<string, { x: number; y: number }>>(() => {
@@ -146,6 +227,46 @@ export default function App() {
     }
   });
   const [draggingIp, setDraggingIp] = useState<string | null>(null);
+
+  const resetRouterPos = () => {
+    setRouterPos({ x: 330, y: 230 });
+    try {
+      localStorage.removeItem('lanscape_router_pos');
+    } catch {}
+  };
+
+  const addWallDirect = (orientation: 'horizontal' | 'vertical') => {
+    const id = `wall_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+    const newWall: WallSegment = orientation === 'horizontal'
+      ? { id, x1: 280, y1: 240, x2: 520, y2: 240 }
+      : { id, x1: 400, y1: 100, x2: 400, y2: 360 };
+    const next = [...walls, newWall];
+    setWalls(next);
+    try { localStorage.setItem('lanscape_walls', JSON.stringify(next)); } catch {}
+  };
+
+  const deleteWall = (id: string) => {
+    const next = walls.filter(w => w.id !== id);
+    setWalls(next);
+    try { localStorage.setItem('lanscape_walls', JSON.stringify(next)); } catch {}
+  };
+
+  const undoLastWall = () => {
+    if (walls.length === 0) return;
+    const next = walls.slice(0, -1);
+    setWalls(next);
+    try { localStorage.setItem('lanscape_walls', JSON.stringify(next)); } catch {}
+  };
+
+  const clearAllWalls = () => {
+    setWalls([]);
+    try { localStorage.setItem('lanscape_walls', JSON.stringify([])); } catch {}
+  };
+
+  const resetDefaultWalls = () => {
+    setWalls(DEFAULT_STARTER_WALLS);
+    try { localStorage.setItem('lanscape_walls', JSON.stringify(DEFAULT_STARTER_WALLS)); } catch {}
+  };
 
   const updateDeviceLocation = (ip: string, x: number, y: number) => {
     const clampedX = Math.round(Math.max(65, Math.min(785, x)));
@@ -177,6 +298,14 @@ export default function App() {
     } catch {}
   };
 
+  const handlePointerDownRouter = (e: React.PointerEvent) => {
+    e.stopPropagation();
+    try {
+      (e.currentTarget as Element).setPointerCapture?.(e.pointerId);
+    } catch {}
+    setDraggingIp('__router__');
+  };
+
   const handlePointerDownDevice = (e: React.PointerEvent, ip: string, device: DeviceData) => {
     e.stopPropagation();
     try {
@@ -186,24 +315,93 @@ export default function App() {
     setSelectedDevice(device);
   };
 
-  const handlePointerMoveSvg = (e: React.PointerEvent<SVGSVGElement>) => {
-    if (!draggingIp || !svgRef.current) return;
+  const handlePointerDownSvg = (e: React.PointerEvent<SVGSVGElement>) => {
+    if (!isWallBuilderOpen) return;
+    if (draggingIp) return;
+    if (!svgRef.current) return;
     const pt = svgRef.current.createSVGPoint();
     pt.x = e.clientX;
     pt.y = e.clientY;
     const ctm = svgRef.current.getScreenCTM();
     if (!ctm) return;
     const inv = pt.matrixTransform(ctm.inverse());
-    const clampedX = Math.round(Math.max(65, Math.min(785, inv.x)));
+    const snapX = Math.round(Math.max(60, Math.min(790, inv.x)) / 20) * 20;
+    const snapY = Math.round(Math.max(45, Math.min(455, inv.y)) / 20) * 20;
+
+    setDrawingStart({ x: snapX, y: snapY });
+    setDrawingCurrent({ x: snapX, y: snapY });
+  };
+
+  const handlePointerMoveSvg = (e: React.PointerEvent<SVGSVGElement>) => {
+    if (!svgRef.current) return;
+    const pt = svgRef.current.createSVGPoint();
+    pt.x = e.clientX;
+    pt.y = e.clientY;
+    const ctm = svgRef.current.getScreenCTM();
+    if (!ctm) return;
+    const inv = pt.matrixTransform(ctm.inverse());
+    const clampedX = Math.round(Math.max(60, Math.min(790, inv.x)));
     const clampedY = Math.round(Math.max(45, Math.min(455, inv.y)));
 
-    setCustomLocations(prev => ({
-      ...prev,
-      [draggingIp]: { x: clampedX, y: clampedY }
-    }));
+    setHoverProbe({ x: clampedX, y: clampedY, visible: true });
+
+    if (isWallBuilderOpen && drawingStart) {
+      let snapX = Math.round(clampedX / 20) * 20;
+      let snapY = Math.round(clampedY / 20) * 20;
+      // Auto-snap to orthogonal (horizontal or vertical) unless Shift is pressed
+      if (!e.shiftKey) {
+        const dx = Math.abs(snapX - drawingStart.x);
+        const dy = Math.abs(snapY - drawingStart.y);
+        if (dx > dy) {
+          snapY = drawingStart.y;
+        } else {
+          snapX = drawingStart.x;
+        }
+      }
+      setDrawingCurrent({ x: snapX, y: snapY });
+      return;
+    }
+
+    if (draggingIp === '__router__') {
+      setRouterPos({ x: clampedX, y: clampedY });
+      return;
+    }
+
+    if (draggingIp) {
+      setCustomLocations(prev => ({
+        ...prev,
+        [draggingIp]: { x: clampedX, y: clampedY }
+      }));
+    }
   };
 
   const handlePointerUpSvg = () => {
+    if (isWallBuilderOpen && drawingStart && drawingCurrent) {
+      const length = Math.hypot(drawingCurrent.x - drawingStart.x, drawingCurrent.y - drawingStart.y);
+      if (length >= 35) {
+        const newWall: WallSegment = {
+          id: `wall_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+          x1: drawingStart.x,
+          y1: drawingStart.y,
+          x2: drawingCurrent.x,
+          y2: drawingCurrent.y
+        };
+        const next = [...walls, newWall];
+        setWalls(next);
+        try { localStorage.setItem('lanscape_walls', JSON.stringify(next)); } catch {}
+      }
+      setDrawingStart(null);
+      setDrawingCurrent(null);
+      return;
+    }
+
+    if (draggingIp === '__router__') {
+      setDraggingIp(null);
+      try {
+        localStorage.setItem('lanscape_router_pos', JSON.stringify(routerPos));
+      } catch {}
+      return;
+    }
     if (draggingIp) {
       setDraggingIp(null);
       try {
@@ -343,8 +541,9 @@ export default function App() {
 
   // Dynamically assign slots based strictly on actual client devices, prioritizing online devices
   const mappedDevicePins = (() => {
-    const remainingSlots = [...ROOM_SLOTS];
-    const rawPins: Array<{ device: DeviceData; slot: typeof ROOM_SLOTS[0]; type: string }> = [];
+    const activeSlots = DEFAULT_CLIENT_SLOTS;
+    const remainingSlots = [...activeSlots];
+    const rawPins: Array<{ device: DeviceData; slot: typeof activeSlots[0]; type: string }> = [];
 
     // Sort: online first, then by IP
     const sortedDevices = [...clientDevices].sort((a, b) => {
@@ -377,7 +576,7 @@ export default function App() {
       const custom = customLocations[p.device.ip_address];
       const x = custom ? custom.x : p.slot.x;
       const y = custom ? custom.y : p.slot.y;
-      const sig = getSignalAtCoord(x, y, heatmapBand === '5ghz');
+      const sig = getSignalAtCoord(x, y, heatmapBand === '5ghz', routerPos.x, routerPos.y, walls);
       const roomName = getRoomNameAtCoord(x, y);
       return {
         ...p,
@@ -389,19 +588,6 @@ export default function App() {
       };
     });
   })();
-
-  const handleDistanceSlider = (ip: string, newDistPx: number) => {
-    const pin = mappedDevicePins.find(p => p.device.ip_address === ip);
-    const currX = pin ? pin.x : 430;
-    const currY = pin ? pin.y : 395;
-    const dx = currX - 330;
-    const dy = currY - 230;
-    const currentDist = Math.sqrt(dx * dx + dy * dy);
-    const angle = currentDist > 5 ? Math.atan2(dy, dx) : Math.PI / 2;
-    const newX = 330 + newDistPx * Math.cos(angle);
-    const newY = 230 + newDistPx * Math.sin(angle);
-    updateDeviceLocation(ip, newX, newY);
-  };
 
   const displayDownloadMbps = !routerStatus?.reachable
     ? '0.00'
@@ -892,6 +1078,52 @@ export default function App() {
                       </div>
                     )}
 
+                    {/* Floor Plan Wall Designer Toggle */}
+                    <button
+                      onClick={() => setIsWallBuilderOpen(!isWallBuilderOpen)}
+                      className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-full text-xs font-black uppercase border-2 transition-all shadow-xs active:scale-95 ${
+                        isWallBuilderOpen
+                          ? 'bg-[#F06292] text-white border-[#F06292] animate-pulse'
+                          : isDark
+                            ? 'bg-[#1A2048] text-[#CBD5E1] border-[#2A3266] hover:text-white'
+                            : 'bg-white text-[#1E2360] border-[#1E2360] hover:bg-[#FFF0F4]'
+                      }`}
+                      title="Draw and design your walls to see real-time Wi-Fi attenuation"
+                    >
+                      <PenTool className="w-3.5 h-3.5" />
+                      <span>{isWallBuilderOpen ? 'Done Walls' : 'Design Walls'}</span>
+                    </button>
+
+                    {/* Speed & Signal Inspector Toggle */}
+                    <button
+                      onClick={() => setShowSpeedInspector(!showSpeedInspector)}
+                      className={`flex items-center space-x-1 px-2.5 py-1.5 rounded-full text-xs font-black uppercase border-2 transition-all shadow-xs active:scale-95 ${
+                        showSpeedInspector
+                          ? 'bg-[#10B981] text-white border-[#10B981]'
+                          : isDark
+                            ? 'bg-[#1A2048] text-[#94A3B8] border-[#2A3266] hover:text-white'
+                            : 'bg-white text-[#1E2360] border-[#1E2360] hover:bg-[#FFF0F4]'
+                      }`}
+                      title="Hover anywhere on the floor plan to inspect real-time Wi-Fi speed & signal"
+                    >
+                      <Zap className={`w-3.5 h-3.5 ${showSpeedInspector ? 'animate-pulse' : ''}`} />
+                      <span className="hidden sm:inline">Speed Probe</span>
+                    </button>
+
+                    {/* Reset Router Position Button (when router was dragged) */}
+                    {(routerPos.x !== 330 || routerPos.y !== 230) && (
+                      <button
+                        onClick={resetRouterPos}
+                        className={`flex items-center space-x-1 px-2.5 py-1.5 rounded-full text-xs font-black uppercase border-2 transition-all ${
+                          isDark ? 'bg-[#171C3F] text-[#38BDF8] border-[#38BDF8]' : 'bg-white text-[#1E2360] border-[#1E2360]'
+                        }`}
+                        title="Reset router back to center location"
+                      >
+                        <RotateCcw className="w-3.5 h-3.5" />
+                        <span className="hidden xl:inline">Center Router</span>
+                      </button>
+                    )}
+
                     {/* Reset Pins Layout Button */}
                     {Object.keys(customLocations).length > 0 && (
                       <button
@@ -933,6 +1165,81 @@ export default function App() {
                   </div>
                 </div>
 
+                {/* Wall Designer Sub-Toolbar Banner */}
+                {isWallBuilderOpen && (
+                  <div className={`mb-3 p-3 rounded-2xl border-2 flex flex-wrap items-center justify-between gap-2.5 text-xs font-bold animate-in fade-in slide-in-from-top-2 ${
+                    isDark ? 'bg-[#171C3F] border-[#38BDF8]' : 'bg-[#FFF0F4] border-[#1E2360]'
+                  }`}>
+                    <div className="flex items-center space-x-2">
+                      <span className="w-2.5 h-2.5 rounded-full bg-[#F06292] animate-ping" />
+                      <span className={`font-black ${isDark ? 'text-white' : 'text-[#1E2360]'}`}>
+                        🧱 WALL DESIGNER:
+                      </span>
+                      <span className={`text-[11px] hidden sm:inline ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>
+                        Click & drag on the map to draw walls • Click any wall to remove it
+                      </span>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <button
+                        onClick={() => addWallDirect('horizontal')}
+                        className={`px-2.5 py-1 rounded-full text-[11px] font-black border transition ${
+                          isDark ? 'bg-[#111533] border-[#2A3266] text-[#38BDF8] hover:bg-[#38BDF8] hover:text-[#0B0E21]' : 'bg-white border-[#1E2360] text-[#1E2360] hover:bg-[#1E2360] hover:text-white'
+                        }`}
+                        title="Add a horizontal wall in the center"
+                      >
+                        + Horiz Wall
+                      </button>
+                      <button
+                        onClick={() => addWallDirect('vertical')}
+                        className={`px-2.5 py-1 rounded-full text-[11px] font-black border transition ${
+                          isDark ? 'bg-[#111533] border-[#2A3266] text-[#38BDF8] hover:bg-[#38BDF8] hover:text-[#0B0E21]' : 'bg-white border-[#1E2360] text-[#1E2360] hover:bg-[#1E2360] hover:text-white'
+                        }`}
+                        title="Add a vertical wall in the center"
+                      >
+                        + Vert Wall
+                      </button>
+                      <button
+                        onClick={undoLastWall}
+                        disabled={walls.length === 0}
+                        className={`px-2.5 py-1 rounded-full text-[11px] font-black border transition ${
+                          walls.length === 0 ? 'opacity-40 cursor-not-allowed' : ''
+                        } ${
+                          isDark ? 'bg-[#111533] border-[#2A3266] text-white hover:bg-white/10' : 'bg-white border-[#1E2360] text-[#1E2360] hover:bg-gray-100'
+                        }`}
+                        title="Undo last added wall"
+                      >
+                        <Undo className="w-3 h-3 inline mr-1" /> Undo
+                      </button>
+                      <button
+                        onClick={clearAllWalls}
+                        className={`px-2.5 py-1 rounded-full text-[11px] font-black border transition ${
+                          isDark ? 'border-red-800 text-red-400 hover:bg-red-950' : 'border-red-300 text-red-600 hover:bg-red-50'
+                        }`}
+                        title="Remove all walls"
+                      >
+                        <Trash2 className="w-3 h-3 inline mr-1" /> Clear
+                      </button>
+                      <button
+                        onClick={resetDefaultWalls}
+                        className={`px-2.5 py-1 rounded-full text-[11px] font-black border transition ${
+                          isDark ? 'bg-[#111533] border-[#2A3266] text-slate-300' : 'bg-white border-[#1E2360] text-[#1E2360]'
+                        }`}
+                        title="Reset to default starter floor plan"
+                      >
+                        ↺ Reset
+                      </button>
+                      <button
+                        onClick={() => setIsWallBuilderOpen(false)}
+                        className="px-3 py-1 rounded-full text-[11px] font-black bg-[#10B981] text-white border border-[#10B981] hover:bg-[#059669] transition flex items-center space-x-1"
+                      >
+                        <Check className="w-3 h-3 inline" />
+                        <span>Done</span>
+                      </button>
+                    </div>
+                  </div>
+                )}
+
                 {/* SVG Floor Plan (Fully Responsive Aspect Ratio) */}
                 <div className={`relative w-full aspect-[4/3] sm:aspect-[16/10] md:aspect-[16/9] min-h-[260px] rounded-2xl border-2 overflow-hidden flex items-center justify-center p-2 transition-colors duration-200 ${
                   isDark ? 'bg-[#0A0D23] border-[#2A3266]' : 'bg-[#FFF8EB] border-[#1E2360]'
@@ -940,16 +1247,20 @@ export default function App() {
                   <svg
                     ref={svgRef}
                     viewBox="0 0 850 500"
-                    className={`w-full h-full select-none ${draggingIp ? 'cursor-grabbing' : ''}`}
+                    className={`w-full h-full select-none ${isWallBuilderOpen ? 'cursor-crosshair' : draggingIp ? 'cursor-grabbing' : ''}`}
                     style={{ touchAction: 'none' }}
+                    onPointerDown={handlePointerDownSvg}
                     onPointerMove={handlePointerMoveSvg}
                     onPointerUp={handlePointerUpSvg}
-                    onPointerLeave={handlePointerUpSvg}
+                    onPointerLeave={() => {
+                      handlePointerUpSvg();
+                      setHoverProbe(prev => ({ ...prev, visible: false }));
+                    }}
                   >
                     {/* SVG Definitions for Wi-Fi Signal Heatmaps */}
                     <defs>
                       {/* 5 GHz Radial Gradient: High speed, sharper wall attenuation */}
-                      <radialGradient id="wifiHeatmap5G" cx="330" cy="230" r="370" fx="330" fy="230" gradientUnits="userSpaceOnUse">
+                      <radialGradient id="wifiHeatmap5G" cx={routerPos.x} cy={routerPos.y} r="370" fx={routerPos.x} fy={routerPos.y} gradientUnits="userSpaceOnUse">
                         <stop offset="0%" stopColor="#10B981" stopOpacity={isDark ? 0.70 : 0.55} />
                         <stop offset="18%" stopColor="#22C55E" stopOpacity={isDark ? 0.60 : 0.45} />
                         <stop offset="38%" stopColor="#EAB308" stopOpacity={isDark ? 0.50 : 0.35} />
@@ -959,7 +1270,7 @@ export default function App() {
                       </radialGradient>
 
                       {/* 2.4 GHz Radial Gradient: Wider radius, deeper wall penetration */}
-                      <radialGradient id="wifiHeatmap24G" cx="330" cy="230" r="480" fx="330" fy="230" gradientUnits="userSpaceOnUse">
+                      <radialGradient id="wifiHeatmap24G" cx={routerPos.x} cy={routerPos.y} r="480" fx={routerPos.x} fy={routerPos.y} gradientUnits="userSpaceOnUse">
                         <stop offset="0%" stopColor="#10B981" stopOpacity={isDark ? 0.65 : 0.50} />
                         <stop offset="26%" stopColor="#22C55E" stopOpacity={isDark ? 0.55 : 0.40} />
                         <stop offset="50%" stopColor="#EAB308" stopOpacity={isDark ? 0.45 : 0.30} />
@@ -969,14 +1280,35 @@ export default function App() {
                       </radialGradient>
                     </defs>
 
-                    {/* Room Color Fills */}
-                    <g stroke="none">
-                      <rect x="140" y="60" width="130" height="180" fill={isDark ? "#141A38" : "#E8EDFB"} />
-                      <rect x="50" y="240" width="210" height="190" fill={isDark ? "#1A1738" : "#F4EDFA"} />
-                      <rect x="270" y="30" width="220" height="120" fill={isDark ? "#222030" : "#FFF2CF"} />
-                      <rect x="270" y="150" width="300" height="200" fill={isDark ? "#0E122B" : "#FFFFFF"} />
-                      <rect x="350" y="350" width="180" height="120" fill={isDark ? "#25152D" : "#FCE7F3"} />
-                      <rect x="570" y="100" width="130" height="340" fill={isDark ? "#131C38" : "#E6F2FD"} />
+                    {/* Architectural Floor Plan Base & Outer Boundary */}
+                    <rect
+                      x="60"
+                      y="45"
+                      width="730"
+                      height="410"
+                      rx="16"
+                      fill={isDark ? "#0F142D" : "#FAF8F5"}
+                      stroke={isDark ? "#818CF8" : "#1E2360"}
+                      strokeWidth="4"
+                    />
+
+                    {/* Subtle Alignment Dot Grid (Visible in Wall Designer Mode) */}
+                    {isWallBuilderOpen && (
+                      <g className="pointer-events-none select-none">
+                        <pattern id="wallDotGrid" width="20" height="20" patternUnits="userSpaceOnUse">
+                          <circle cx="10" cy="10" r="1.2" fill={isDark ? "#818CF8" : "#1E2360"} opacity="0.3" />
+                        </pattern>
+                        <rect x="60" y="45" width="730" height="410" rx="16" fill="url(#wallDotGrid)" />
+                      </g>
+                    )}
+
+                    {/* Floor Area Subtle Tinting */}
+                    <g stroke="none" className="pointer-events-none">
+                      <rect x="60" y="45" width="210" height="185" fill={isDark ? "#141A38" : "#EEF2FF"} opacity="0.55" rx="12" />
+                      <rect x="60" y="235" width="210" height="220" fill={isDark ? "#1A1738" : "#FAF5FF"} opacity="0.55" rx="12" />
+                      <rect x="270" y="45" width="250" height="155" fill={isDark ? "#222030" : "#FEF3C7"} opacity="0.45" rx="12" />
+                      <rect x="520" y="45" width="270" height="205" fill={isDark ? "#131C38" : "#E0F2FE"} opacity="0.45" rx="12" />
+                      <rect x="520" y="250" width="270" height="205" fill={isDark ? "#161D42" : "#F1F5F9"} opacity="0.45" rx="12" />
                     </g>
 
                     {/* WI-FI SIGNAL HEATMAP OVERLAY LAYER */}
@@ -993,8 +1325,8 @@ export default function App() {
                           style={{ mixBlendMode: isDark ? 'screen' : 'multiply' }}
                         />
 
-                        {/* Concentric Propagation Rings from Router (330, 230) */}
-                        <g transform="translate(330, 230)">
+                        {/* Concentric Propagation Rings from Dynamic Router Location */}
+                        <g transform={`translate(${routerPos.x}, ${routerPos.y})`}>
                           <circle cx="0" cy="0" r="75" fill="none" stroke="#22C55E" strokeWidth="1" strokeDasharray="3 3" opacity={isDark ? 0.5 : 0.35} />
                           <circle cx="0" cy="0" r="150" fill="none" stroke="#EAB308" strokeWidth="1" strokeDasharray="4 4" opacity={isDark ? 0.45 : 0.30} />
                           <circle cx="0" cy="0" r="245" fill="none" stroke="#F97316" strokeWidth="1" strokeDasharray="5 5" opacity={isDark ? 0.4 : 0.25} />
@@ -1003,44 +1335,106 @@ export default function App() {
                       </g>
                     )}
 
-                    {/* Architectural Furniture Accents */}
-                    <g stroke={isDark ? "#818CF8" : "#1E2360"} strokeWidth="2" fill="none">
-                      <rect x="490" y="200" width="60" height="30" rx="6" fill={isDark ? "#161D42" : "#FFFFFF"} />
-                      <line x1="490" y1="208" x2="550" y2="208" />
-                      <rect x="498" y="240" width="44" height="16" rx="4" fill={isDark ? "#312E81" : "#FFEAA7"} />
-
-                      <rect x="390" y="365" width="80" height="32" rx="6" fill={isDark ? "#161D42" : "#FFFFFF"} />
-                      <circle cx="430" cy="415" r="10" fill={isDark ? "#381832" : "#FCE7F3"} />
-
-                      <circle cx="70" cy="405" r="8" fill={isDark ? "#065F46" : "#A7F3D0"} />
-                      <circle cx="550" cy="425" r="8" fill={isDark ? "#065F46" : "#A7F3D0"} />
+                    {/* Room Area Directional Labels */}
+                    <g fill={isDark ? "#94A3B8" : "#1E2360"} fontSize="11" fontWeight="800" letterSpacing="0.06em" className="pointer-events-none select-none">
+                      <text x="135" y="145">BEDROOM 1</text>
+                      <text x="135" y="350">BEDROOM 2</text>
+                      <text x="350" y="100">KITCHEN</text>
+                      <text x="400" y="435" fill="#F06292">WORK NOOK</text>
+                      <text x="630" y="145">TV LOUNGE</text>
+                      <text x="630" y="350">BALCONY</text>
                     </g>
 
-                    {/* Room Labels */}
-                    <g fill={isDark ? "#94A3B8" : "#1E2360"} fontSize="11" fontWeight="800" letterSpacing="0.06em">
-                      <text x="165" y="155">BEDROOM 1</text>
-                      <text x="95" y="340">BEDROOM 2</text>
-                      <text x="340" y="90">KITCHEN</text>
-                      <text x="405" y="445" fill="#F06292">LAPTOP ROOM</text>
-                      <text x="515" y="180">TV LOUNGE</text>
+                    {/* User-Designed Architectural Walls */}
+                    <g>
+                      {walls.map(w => {
+                        const isHovered = hoveredWallId === w.id;
+                        const midX = (w.x1 + w.x2) / 2;
+                        const midY = (w.y1 + w.y2) / 2;
+
+                        return (
+                          <g key={w.id} className="group">
+                            {/* Wide transparent hit target for deleting when in Wall Designer mode */}
+                            {isWallBuilderOpen && (
+                              <line
+                                x1={w.x1}
+                                y1={w.y1}
+                                x2={w.x2}
+                                y2={w.y2}
+                                stroke="transparent"
+                                strokeWidth="22"
+                                className="cursor-pointer"
+                                onPointerEnter={() => setHoveredWallId(w.id)}
+                                onPointerLeave={() => setHoveredWallId(null)}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  deleteWall(w.id);
+                                }}
+                              />
+                            )}
+
+                            {/* Solid Wall Bar */}
+                            <line
+                              x1={w.x1}
+                              y1={w.y1}
+                              x2={w.x2}
+                              y2={w.y2}
+                              stroke={
+                                isWallBuilderOpen && isHovered
+                                  ? "#EF4444"
+                                  : isDark ? "#818CF8" : "#1E2360"
+                              }
+                              strokeWidth={isWallBuilderOpen && isHovered ? "6" : "4.5"}
+                              strokeLinecap="round"
+                              className="transition-colors pointer-events-none"
+                            />
+
+                            {/* Delete Pill Indicator when Hovered in Designer Mode */}
+                            {isWallBuilderOpen && isHovered && (
+                              <g transform={`translate(${midX}, ${midY})`} className="pointer-events-none select-none">
+                                <circle cx="0" cy="0" r="11" fill="#EF4444" stroke="#FFFFFF" strokeWidth="2" />
+                                <text x="0" y="3.5" textAnchor="middle" fill="#FFFFFF" fontSize="9" fontWeight="900">
+                                  ✕
+                                </text>
+                              </g>
+                            )}
+                          </g>
+                        );
+                      })}
                     </g>
 
-                    {/* Architectural Walls */}
-                    <g stroke={isDark ? "#818CF8" : "#1E2360"} strokeWidth="4" strokeLinecap="round" strokeLinejoin="round" fill="none">
-                      <path d="M140,240 L140,65 L270,65 L270,140" />
-                      <path d="M270,65 L270,35 L490,35 L490,150" />
-                      <path d="M390,150 L490,150" />
-                      <path d="M140,240 L55,240 L55,430 L260,430 L260,355" />
-                      <path d="M140,240 L270,240 L270,355" />
-                      <path d="M350,350 L350,470 L530,470 L530,410" />
-                      <path d="M530,370 L530,350 L350,350" />
-                      <path d="M530,370 A40,40 0 0,0 530,410" stroke={isDark ? "#818CF8" : "#1E2360"} strokeWidth="1.5" strokeDasharray="3 3" />
-                      <path d="M490,150 L630,150 L630,105 L700,105 L700,440 L600,440" />
-                      <path d="M600,440 L560,440" />
-                    </g>
+                    {/* Active Wall Drawing Live Preview */}
+                    {isWallBuilderOpen && drawingStart && drawingCurrent && (() => {
+                      const wallLenM = (Math.hypot(drawingCurrent.x - drawingStart.x, drawingCurrent.y - drawingStart.y) / 55).toFixed(1);
+                      const midX = (drawingStart.x + drawingCurrent.x) / 2;
+                      const midY = (drawingStart.y + drawingCurrent.y) / 2;
+
+                      return (
+                        <g className="pointer-events-none select-none">
+                          <line
+                            x1={drawingStart.x}
+                            y1={drawingStart.y}
+                            x2={drawingCurrent.x}
+                            y2={drawingCurrent.y}
+                            stroke="#F06292"
+                            strokeWidth="5"
+                            strokeDasharray="6 4"
+                            strokeLinecap="round"
+                          />
+                          <circle cx={drawingStart.x} cy={drawingStart.y} r="5" fill="#F06292" />
+                          <circle cx={drawingCurrent.x} cy={drawingCurrent.y} r="5" fill="#F06292" />
+                          <g transform={`translate(${midX}, ${midY - 12})`}>
+                            <rect x="-24" y="-8" width="48" height="16" rx="8" fill="#F06292" />
+                            <text x="0" y="3.5" textAnchor="middle" fill="#FFFFFF" fontSize="8.5" fontWeight="900">
+                              {wallLenM}m
+                            </text>
+                          </g>
+                        </g>
+                      );
+                    })()}
 
                     {/* Concentric Wi-Fi waves from router (only when router is reachable and heatmap is off) */}
-                    <g transform="translate(330, 230)">
+                    <g transform={`translate(${routerPos.x}, ${routerPos.y})`}>
                       {routerStatus?.reachable && !showHeatmap && (
                         <>
                           <circle cx="0" cy="0" r="45" fill="none" stroke="#F06292" strokeWidth="1.5" opacity="0.25" />
@@ -1048,23 +1442,47 @@ export default function App() {
                         </>
                       )}
 
-                      {/* Zyxel Router Gateway Icon with stationary hit target */}
+                      {/* Zyxel Router Gateway Icon with draggable hit target */}
                       <g
                         className="cursor-pointer group"
-                        onClick={() => setSelectedDevice({
-                          id: 1,
-                          ip_address: '192.168.1.1',
-                          mac_address: '14:33:75:03:f5:95',
-                          hostname: 'Zyxel-PMG5617-R20B',
-                          friendly_name: 'Airtel GPON ONT',
-                          source: 'gateway_router',
-                          first_seen: new Date().toISOString(),
-                          last_seen: new Date().toISOString(),
-                          last_status: routerStatus?.reachable ? 'online' : 'disconnected'
-                        })}
                       >
-                        {/* Stationary hit area preventing hover jitter */}
-                        <circle cx="0" cy="0" r="32" fill="transparent" pointerEvents="all" />
+                        {/* Stationary hit area with pointer capture for dragging the router */}
+                        <circle
+                          cx="0"
+                          cy="0"
+                          r="34"
+                          fill="transparent"
+                          pointerEvents="all"
+                          className="cursor-grab active:cursor-grabbing"
+                          onPointerDown={handlePointerDownRouter}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setSelectedDevice({
+                              id: 1,
+                              ip_address: '192.168.1.1',
+                              mac_address: '14:33:75:03:f5:95',
+                              hostname: 'Zyxel-PMG5617-R20B',
+                              friendly_name: 'Airtel GPON ONT',
+                              source: 'gateway_router',
+                              first_seen: new Date().toISOString(),
+                              last_seen: new Date().toISOString(),
+                              last_status: routerStatus?.reachable ? 'online' : 'disconnected'
+                            });
+                          }}
+                        />
+
+                        {/* Dragging Router visual beacon */}
+                        {draggingIp === '__router__' && (
+                          <g className="pointer-events-none select-none">
+                            <circle cx="0" cy="0" r="46" fill="none" stroke="#F06292" strokeWidth="2" strokeDasharray="4 3" />
+                            <g transform="translate(0, -32)">
+                              <rect x="-50" y="-9" width="100" height="18" rx="9" fill="#F06292" />
+                              <text x="0" y="3.5" textAnchor="middle" fill="#FFFFFF" fontSize="8" fontWeight="900">
+                                📍 RELOCATING ROUTER
+                              </text>
+                            </g>
+                          </g>
+                        )}
 
                         <g className="transition-transform duration-150 ease-out group-hover:scale-110 group-active:scale-95 pointer-events-none" style={{ transformOrigin: '0px 0px' }}>
                           <rect
@@ -1098,16 +1516,16 @@ export default function App() {
                     </g>
 
                     {/* Dynamic Dragging Guide Line from Router to Dragged Device */}
-                    {draggingIp && (() => {
+                    {draggingIp && draggingIp !== '__router__' && (() => {
                       const pin = mappedDevicePins.find(p => p.device.ip_address === draggingIp);
                       if (!pin) return null;
-                      const midX = (330 + pin.x) / 2;
-                      const midY = (230 + pin.y) / 2;
+                      const midX = (routerPos.x + pin.x) / 2;
+                      const midY = (routerPos.y + pin.y) / 2;
                       return (
                         <g className="pointer-events-none select-none">
                           <line
-                            x1="330"
-                            y1="230"
+                            x1={routerPos.x}
+                            y1={routerPos.y}
                             x2={pin.x}
                             y2={pin.y}
                             stroke={pin.sig.color}
@@ -1119,9 +1537,9 @@ export default function App() {
                           {/* Distance & Signal HUD pill at midpoint */}
                           <g transform={`translate(${midX}, ${midY})`}>
                             <rect
-                              x="-42"
+                              x="-50"
                               y="-11"
-                              width="84"
+                              width="100"
                               height="22"
                               rx="11"
                               fill={isDark ? "#0A0D23" : "#FFFFFF"}
@@ -1133,10 +1551,10 @@ export default function App() {
                               y="4"
                               textAnchor="middle"
                               fill={pin.sig.color}
-                              fontSize="9"
+                              fontSize="8.5"
                               fontWeight="900"
                             >
-                              {pin.sig.distMeters}m • {pin.sig.rssi} dBm
+                              {pin.sig.distMeters}m • ~{pin.sig.estimatedSpeedMbps}M
                             </text>
                           </g>
                         </g>
@@ -1234,9 +1652,9 @@ export default function App() {
                             {showHeatmap && isOnline && (
                               <g transform="translate(0, -25)">
                                 <rect
-                                  x="-24"
+                                  x="-37"
                                   y="-8"
-                                  width="48"
+                                  width="74"
                                   height="16"
                                   rx="8"
                                   fill={isDark ? "#0E132D" : "#FFFFFF"}
@@ -1248,10 +1666,10 @@ export default function App() {
                                   y="3.5"
                                   textAnchor="middle"
                                   fill={sig.color}
-                                  fontSize="8"
+                                  fontSize="7.5"
                                   fontWeight="900"
                                 >
-                                  {sig.rssi} dBm
+                                  {sig.rssi} dBm • ~{sig.estimatedSpeedMbps}M
                                 </text>
                               </g>
                             )}
@@ -1281,6 +1699,62 @@ export default function App() {
                         </g>
                       );
                     })}
+
+                    {/* Interactive Speed & Signal Inspector Reticle + Floating HUD */}
+                    {showSpeedInspector && hoverProbe.visible && !draggingIp && !isWallBuilderOpen && (() => {
+                      const probeSig = getSignalAtCoord(hoverProbe.x, hoverProbe.y, heatmapBand === '5ghz', routerPos.x, routerPos.y, walls);
+                      const probeRoom = getRoomNameAtCoord(hoverProbe.x, hoverProbe.y);
+                      const tooltipX = hoverProbe.x > 670 ? hoverProbe.x - 175 : hoverProbe.x + 18;
+                      const tooltipY = hoverProbe.y > 410 ? hoverProbe.y - 70 : Math.max(30, hoverProbe.y - 35);
+
+                      return (
+                        <g className="pointer-events-none select-none">
+                          {/* Radial guide line from router to probe */}
+                          <line
+                            x1={routerPos.x}
+                            y1={routerPos.y}
+                            x2={hoverProbe.x}
+                            y2={hoverProbe.y}
+                            stroke={probeSig.color}
+                            strokeWidth="1.8"
+                            strokeDasharray="4 3"
+                            opacity="0.8"
+                          />
+                          {/* Target Reticle */}
+                          <circle cx={hoverProbe.x} cy={hoverProbe.y} r="18" fill="none" stroke={probeSig.color} strokeWidth="2" strokeDasharray="3 3" opacity="0.9" />
+                          <circle cx={hoverProbe.x} cy={hoverProbe.y} r="3.5" fill={probeSig.color} />
+                          <line x1={hoverProbe.x - 10} y1={hoverProbe.y} x2={hoverProbe.x + 10} y2={hoverProbe.y} stroke={probeSig.color} strokeWidth="1.5" />
+                          <line x1={hoverProbe.x} y1={hoverProbe.y - 10} x2={hoverProbe.x} y2={hoverProbe.y + 10} stroke={probeSig.color} strokeWidth="1.5" />
+
+                          {/* Floating HUD Tooltip */}
+                          <g transform={`translate(${tooltipX}, ${tooltipY})`}>
+                            <rect
+                              x="0"
+                              y="0"
+                              width="168"
+                              height="68"
+                              rx="10"
+                              fill={isDark ? "#0A0D23" : "#FFFFFF"}
+                              stroke={probeSig.color}
+                              strokeWidth="2"
+                              filter="drop-shadow(0 4px 6px rgba(0,0,0,0.25))"
+                            />
+                            {/* Estimated Speed */}
+                            <text x="12" y="21" fill={probeSig.color} fontSize="14" fontWeight="900">
+                              ⚡ ~{probeSig.estimatedSpeedMbps} Mbps
+                            </text>
+                            {/* Signal & Distance */}
+                            <text x="12" y="38" fill={isDark ? "#E2E8F0" : "#1E2360"} fontSize="9" fontWeight="800">
+                              {probeSig.rssi} dBm ({probeSig.quality}) • {probeSig.distMeters}m
+                            </text>
+                            {/* Walls In Path */}
+                            <text x="12" y="54" fill={isDark ? "#94A3B8" : "#64748B"} fontSize="8" fontWeight="800">
+                              🧱 {probeSig.wallsCrossed === 0 ? 'Direct Line of Sight (0 walls)' : `${probeSig.wallsCrossed} wall${probeSig.wallsCrossed > 1 ? 's' : ''} in path (-${Math.round(probeSig.wallsCrossed * (heatmapBand === '5ghz' ? 6.5 : 4.0))} dBm)`}
+                            </text>
+                          </g>
+                        </g>
+                      );
+                    })()}
 
                     {/* Translucent Heatmap HUD Legend (Bottom Corner) */}
                     {showHeatmap && (
@@ -1314,15 +1788,26 @@ export default function App() {
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1.5 mt-2 px-1 text-[11px] font-bold">
                   <span className={`flex items-center space-x-1.5 ${isDark ? 'text-[#94A3B8]' : 'text-[#64748B]'}`}>
                     <Move className="w-3.5 h-3.5 text-[#F06292]" />
-                    <span>Drag device bubbles anywhere &bull; Proximity to router dynamically recalibrates signal dBm</span>
+                    <span>
+                      {isWallBuilderOpen
+                        ? 'Wall Mode: Drag on map to draw partition walls • Click any wall to remove it'
+                        : 'Drag router or devices anywhere • Custom walls dynamically block signal & reduce speeds'}
+                    </span>
                   </span>
-                  {Object.keys(customLocations).length > 0 && (
-                    <span className={`text-[10px] font-black uppercase px-2 py-0.5 rounded-full border self-start sm:self-auto ${
+                  <div className="flex items-center space-x-2 self-start sm:self-auto">
+                    <span className={`text-[10px] font-black uppercase px-2 py-0.5 rounded-full border ${
                       isDark ? 'bg-[#171C3F] border-[#38BDF8] text-[#38BDF8]' : 'bg-[#FFF0F4] border-[#F06292] text-[#F06292]'
                     }`}>
-                      {Object.keys(customLocations).length} Custom Location{Object.keys(customLocations).length > 1 ? 's' : ''}
+                      {walls.length} Wall{walls.length === 1 ? '' : 's'}
                     </span>
-                  )}
+                    {Object.keys(customLocations).length > 0 && (
+                      <span className={`text-[10px] font-black uppercase px-2 py-0.5 rounded-full border ${
+                        isDark ? 'bg-[#171C3F] border-[#38BDF8] text-[#38BDF8]' : 'bg-[#FFF0F4] border-[#F06292] text-[#F06292]'
+                      }`}>
+                        {Object.keys(customLocations).length} Custom Location{Object.keys(customLocations).length > 1 ? 's' : ''}
+                      </span>
+                    )}
+                  </div>
                 </div>
 
                 {/* Selected Device Banner with Wi-Fi Diagnostics & Spatial Relocation */}
@@ -1356,7 +1841,7 @@ export default function App() {
                               {selectedDevice.ip_address} &bull; MAC: {maskMac(selectedDevice.mac_address)}
                               {isOnline && sig && (
                                 <span className="ml-2 font-sans font-bold">
-                                  &bull; {devPin?.roomName} ({sig.distMeters}m) &bull; {sig.rssi} dBm ({sig.quality})
+                                  &bull; {sig.distMeters}m &bull; {sig.rssi} dBm ({sig.quality}) &bull; ~{sig.estimatedSpeedMbps} Mbps
                                 </span>
                               )}
                               {!isOnline && ` &bull; Last seen: ${new Date(selectedDevice.last_seen).toLocaleTimeString()}`}
@@ -1372,6 +1857,18 @@ export default function App() {
                               <Signal className="w-3 h-3 text-[#10B981]" />
                               <span>{sig.percent}%</span>
                             </div>
+                          )}
+
+                          {devPin?.isCustom && (
+                            <button
+                              onClick={() => resetDeviceLocation(selectedDevice.ip_address)}
+                              className={`px-2.5 py-1 rounded-full text-[10px] font-bold border transition ${
+                                isDark ? 'border-red-900 text-red-400 hover:bg-red-950' : 'border-red-300 text-red-600 hover:bg-red-50'
+                              }`}
+                              title="Reset pin back to default slot"
+                            >
+                              Reset Pin
+                            </button>
                           )}
 
                           <span className={`font-black px-2.5 sm:px-3 py-1 rounded-full text-[9px] sm:text-[10px] uppercase ${
@@ -1394,65 +1891,6 @@ export default function App() {
                           </button>
                         </div>
                       </div>
-
-                      {/* Quick Room Placement & Distance Calibration Controls */}
-                      {selectedDevice.ip_address !== '192.168.1.1' && devPin && (
-                        <div className={`pt-2.5 border-t flex flex-col lg:flex-row lg:items-center justify-between gap-3 ${
-                          isDark ? 'border-[#2A3266]' : 'border-[#1E2360]/20'
-                        }`}>
-                          {/* Room Buttons */}
-                          <div className="flex flex-wrap items-center gap-1.5">
-                            <span className="text-[10px] font-black uppercase tracking-wider text-[#F06292] flex items-center gap-1 mr-1">
-                              <MapPin className="w-3 h-3" /> Move:
-                            </span>
-                            {PRESET_ROOMS.map(r => (
-                              <button
-                                key={r.id}
-                                onClick={() => updateDeviceLocation(selectedDevice.ip_address, r.x, r.y)}
-                                className={`px-2 py-0.5 rounded-full text-[10px] font-bold border transition ${
-                                  devPin.roomName === r.name
-                                    ? 'bg-[#F06292] text-white border-[#F06292]'
-                                    : isDark
-                                      ? 'bg-[#111533] border-[#2A3266] text-[#CBD5E1] hover:text-white'
-                                      : 'bg-white border-[#1E2360] text-[#1E2360] hover:bg-[#FFF0F4]'
-                                }`}
-                              >
-                                {r.icon} {r.name}
-                              </button>
-                            ))}
-                            {devPin.isCustom && (
-                              <button
-                                onClick={() => resetDeviceLocation(selectedDevice.ip_address)}
-                                className={`px-2 py-0.5 rounded-full text-[10px] font-bold border transition ${
-                                  isDark ? 'border-red-900 text-red-400 hover:bg-red-950' : 'border-red-300 text-red-600 hover:bg-red-50'
-                                }`}
-                                title="Reset to default slot"
-                              >
-                                Reset
-                              </button>
-                            )}
-                          </div>
-
-                          {/* Distance to Router Slider */}
-                          <div className="flex items-center space-x-2 shrink-0">
-                            <span className="text-[10px] font-black uppercase text-gray-400 shrink-0">
-                              Proximity:
-                            </span>
-                            <input
-                              type="range"
-                              min="30"
-                              max="390"
-                              value={devPin.sig.distPx}
-                              onChange={(e) => handleDistanceSlider(selectedDevice.ip_address, Number(e.target.value))}
-                              className="w-24 sm:w-28 h-1.5 bg-gray-200 dark:bg-gray-700 rounded-lg appearance-none cursor-pointer accent-[#F06292]"
-                              title="Drag closer/farther from router"
-                            />
-                            <span className="text-[10px] font-mono font-bold shrink-0 text-[#10B981]">
-                              {devPin.sig.distMeters}m ({devPin.sig.rssi} dBm)
-                            </span>
-                          </div>
-                        </div>
-                      )}
                     </div>
                   );
                 })()}
