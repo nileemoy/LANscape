@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   Wifi,
   Monitor,
@@ -17,7 +17,10 @@ import {
   Sun,
   Moon,
   Radio,
-  Signal
+  Signal,
+  Move,
+  RotateCcw,
+  MapPin
 } from 'lucide-react';
 import {
   HealthStatus,
@@ -38,20 +41,40 @@ const ROOM_SLOTS = [
   { id: 'corridor', x: 635, y: 260, room: 'CORRIDOR', type: 'generic' },
 ];
 
-// Physical Wi-Fi signal propagation model (attenuation through distance + interior walls)
-const getSlotSignal = (slotId: string, is5G: boolean = true) => {
-  const profiles: Record<string, { rssi5G: number; rssi24G: number }> = {
-    laptop_room: { rssi5G: -52, rssi24G: -47 }, // 1 drywall, 190px -> Very Strong
-    tv_lounge:   { rssi5G: -62, rssi24G: -55 }, // Line-of-sight doorway, 220px -> Good
-    kitchen:     { rssi5G: -56, rssi24G: -50 }, // Open boundary, 160px -> Very Strong
-    bedroom_1:   { rssi5G: -65, rssi24G: -58 }, // 1 partition wall, 175px -> Good
-    bedroom_2:   { rssi5G: -76, rssi24G: -67 }, // 2 solid walls, bottom-left -> Fair
-    corridor:    { rssi5G: -72, rssi24G: -64 }, // Far right corridor -> Fair
-  };
+// Preset rooms for quick device relocation
+const PRESET_ROOMS = [
+  { id: 'laptop_room', name: 'Work Desk', x: 430, y: 395, icon: '💻' },
+  { id: 'tv_lounge',   name: 'TV Lounge', x: 535, y: 140, icon: '📺' },
+  { id: 'kitchen',     name: 'Kitchen',   x: 360, y: 75,  icon: '🍳' },
+  { id: 'bedroom_1',   name: 'Bedroom 1', x: 195, y: 120, icon: '🛏️' },
+  { id: 'bedroom_2',   name: 'Bedroom 2', x: 130, y: 310, icon: '🚪' },
+  { id: 'corridor',    name: 'Corridor',  x: 635, y: 260, icon: '🚶' },
+  { id: 'living_room', name: 'Near Router', x: 390, y: 230, icon: '🛋️' },
+];
 
-  const prof = profiles[slotId] || { rssi5G: -66, rssi24G: -59 };
-  const rssi = is5G ? prof.rssi5G : prof.rssi24G;
-  const percent = Math.min(100, Math.max(15, Math.round(((rssi + 95) / 55) * 100)));
+// Physical Wi-Fi signal propagation model (attenuation through distance + interior walls)
+const getSignalAtCoord = (x: number, y: number, is5G: boolean = true) => {
+  const dx = x - 330;
+  const dy = y - 230;
+  const distPx = Math.sqrt(dx * dx + dy * dy);
+  const distMeters = Math.max(0.5, distPx / 55).toFixed(1);
+
+  // Path loss model with logarithmic distance decay
+  const baseLoss = is5G
+    ? 20 * Math.log10(Math.max(14, distPx) / 16)
+    : 16 * Math.log10(Math.max(14, distPx) / 16);
+
+  // Spatial wall attenuation penalties:
+  let wallPenalty = 0;
+  if (x < 270) wallPenalty += (is5G ? 7 : 4);
+  if (x < 140) wallPenalty += (is5G ? 6 : 3);
+  if (y > 350 && x >= 330 && x <= 560) wallPenalty += (is5G ? 5 : 2.5);
+  if (y < 140 && x > 250 && x < 540) wallPenalty += (is5G ? 4 : 2);
+  if (x > 560) wallPenalty += (is5G ? 6 : 3);
+
+  const rawRssi = (is5G ? -36 : -32) - baseLoss - wallPenalty;
+  const rssi = Math.max(-90, Math.min(-34, Math.round(rawRssi)));
+  const percent = Math.min(100, Math.max(12, Math.round(((rssi + 95) / 55) * 100)));
 
   let quality: 'Excellent' | 'Good' | 'Fair' | 'Weak' = 'Good';
   let color = '#22C55E';
@@ -69,7 +92,23 @@ const getSlotSignal = (slotId: string, is5G: boolean = true) => {
     color = '#EF4444';
   }
 
-  return { rssi, percent, quality, color };
+  return { rssi, percent, quality, color, distPx: Math.round(distPx), distMeters };
+};
+
+const getRoomNameAtCoord = (x: number, y: number): string => {
+  if (y > 340 && x >= 330 && x <= 560) return 'Laptop Room';
+  if (x >= 530 && y <= 210) return 'TV Lounge';
+  if (x <= 270 && y <= 220) return 'Bedroom 1';
+  if (x <= 270 && y > 220) return 'Bedroom 2';
+  if (y <= 150 && x > 260 && x < 530) return 'Kitchen';
+  if (x > 560) return 'Corridor / Balcony';
+  return 'Living Room (Central)';
+};
+
+// Backwards compatibility wrapper
+const getSlotSignal = (slotId: string, is5G: boolean = true) => {
+  const slot = ROOM_SLOTS.find(s => s.id === slotId) || ROOM_SLOTS[0];
+  return getSignalAtCoord(slot.x, slot.y, is5G);
 };
 
 export default function App() {
@@ -95,6 +134,83 @@ export default function App() {
   });
   const [showHeatmap, setShowHeatmap] = useState<boolean>(false);
   const [heatmapBand, setHeatmapBand] = useState<'5ghz' | '2.4ghz'>('5ghz');
+
+  // Interactive Floor Plan Device Placement & Dragging
+  const svgRef = useRef<SVGSVGElement | null>(null);
+  const [customLocations, setCustomLocations] = useState<Record<string, { x: number; y: number }>>(() => {
+    try {
+      const saved = localStorage.getItem('lanscape_device_locations');
+      return saved ? JSON.parse(saved) : {};
+    } catch {
+      return {};
+    }
+  });
+  const [draggingIp, setDraggingIp] = useState<string | null>(null);
+
+  const updateDeviceLocation = (ip: string, x: number, y: number) => {
+    const clampedX = Math.round(Math.max(65, Math.min(785, x)));
+    const clampedY = Math.round(Math.max(45, Math.min(455, y)));
+    setCustomLocations(prev => {
+      const next = { ...prev, [ip]: { x: clampedX, y: clampedY } };
+      try {
+        localStorage.setItem('lanscape_device_locations', JSON.stringify(next));
+      } catch {}
+      return next;
+    });
+  };
+
+  const resetDeviceLocation = (ip: string) => {
+    setCustomLocations(prev => {
+      const next = { ...prev };
+      delete next[ip];
+      try {
+        localStorage.setItem('lanscape_device_locations', JSON.stringify(next));
+      } catch {}
+      return next;
+    });
+  };
+
+  const resetAllLocations = () => {
+    setCustomLocations({});
+    try {
+      localStorage.removeItem('lanscape_device_locations');
+    } catch {}
+  };
+
+  const handlePointerDownDevice = (e: React.PointerEvent, ip: string, device: DeviceData) => {
+    e.stopPropagation();
+    try {
+      (e.currentTarget as Element).setPointerCapture?.(e.pointerId);
+    } catch {}
+    setDraggingIp(ip);
+    setSelectedDevice(device);
+  };
+
+  const handlePointerMoveSvg = (e: React.PointerEvent<SVGSVGElement>) => {
+    if (!draggingIp || !svgRef.current) return;
+    const pt = svgRef.current.createSVGPoint();
+    pt.x = e.clientX;
+    pt.y = e.clientY;
+    const ctm = svgRef.current.getScreenCTM();
+    if (!ctm) return;
+    const inv = pt.matrixTransform(ctm.inverse());
+    const clampedX = Math.round(Math.max(65, Math.min(785, inv.x)));
+    const clampedY = Math.round(Math.max(45, Math.min(455, inv.y)));
+
+    setCustomLocations(prev => ({
+      ...prev,
+      [draggingIp]: { x: clampedX, y: clampedY }
+    }));
+  };
+
+  const handlePointerUpSvg = () => {
+    if (draggingIp) {
+      setDraggingIp(null);
+      try {
+        localStorage.setItem('lanscape_device_locations', JSON.stringify(customLocations));
+      } catch {}
+    }
+  };
 
   const toggleTheme = () => {
     setIsDark(prev => {
@@ -228,7 +344,7 @@ export default function App() {
   // Dynamically assign slots based strictly on actual client devices, prioritizing online devices
   const mappedDevicePins = (() => {
     const remainingSlots = [...ROOM_SLOTS];
-    const pins: Array<{ device: DeviceData; slot: typeof ROOM_SLOTS[0]; type: string }> = [];
+    const rawPins: Array<{ device: DeviceData; slot: typeof ROOM_SLOTS[0]; type: string }> = [];
 
     // Sort: online first, then by IP
     const sortedDevices = [...clientDevices].sort((a, b) => {
@@ -244,7 +360,7 @@ export default function App() {
       const slotIndex = remainingSlots.findIndex(s => s.type === type);
       if (slotIndex !== -1) {
         const [slot] = remainingSlots.splice(slotIndex, 1);
-        pins.push({ device: d, slot, type });
+        rawPins.push({ device: d, slot, type });
       } else {
         unassignedDevices.push(d);
       }
@@ -253,12 +369,39 @@ export default function App() {
     for (const d of unassignedDevices) {
       if (remainingSlots.length > 0) {
         const slot = remainingSlots.shift()!;
-        pins.push({ device: d, slot, type: getDeviceType(d) });
+        rawPins.push({ device: d, slot, type: getDeviceType(d) });
       }
     }
 
-    return pins;
+    return rawPins.map(p => {
+      const custom = customLocations[p.device.ip_address];
+      const x = custom ? custom.x : p.slot.x;
+      const y = custom ? custom.y : p.slot.y;
+      const sig = getSignalAtCoord(x, y, heatmapBand === '5ghz');
+      const roomName = getRoomNameAtCoord(x, y);
+      return {
+        ...p,
+        x,
+        y,
+        isCustom: !!custom,
+        sig,
+        roomName
+      };
+    });
   })();
+
+  const handleDistanceSlider = (ip: string, newDistPx: number) => {
+    const pin = mappedDevicePins.find(p => p.device.ip_address === ip);
+    const currX = pin ? pin.x : 430;
+    const currY = pin ? pin.y : 395;
+    const dx = currX - 330;
+    const dy = currY - 230;
+    const currentDist = Math.sqrt(dx * dx + dy * dy);
+    const angle = currentDist > 5 ? Math.atan2(dy, dx) : Math.PI / 2;
+    const newX = 330 + newDistPx * Math.cos(angle);
+    const newY = 230 + newDistPx * Math.sin(angle);
+    updateDeviceLocation(ip, newX, newY);
+  };
 
   const displayDownloadMbps = !routerStatus?.reachable
     ? '0.00'
@@ -311,7 +454,12 @@ export default function App() {
           >
             {mobileMenuOpen ? <X className="w-5 h-5 stroke-[2.5]" /> : <Menu className="w-5 h-5 stroke-[2.5]" />}
           </button>
-          <div className="flex items-center space-x-1.5">
+          <div className="flex items-center space-x-2">
+            <div className={`w-8 h-8 rounded-full border-2 overflow-hidden flex items-center justify-center shrink-0 ${
+              isDark ? 'border-[#38BDF8]' : 'border-[#1E2360]'
+            }`}>
+              <img src="/logo.png" alt="LANscape" className="w-full h-full object-cover" />
+            </div>
             <span className={`text-xl font-black ${isDark ? 'text-white' : 'text-[#1E2360]'}`}>LANscape</span>
             <span className={`text-[10px] font-extrabold px-2 py-0.5 rounded-full border ${
               isDark ? 'bg-[#291730] border-[#F472B6] text-[#F472B6]' : 'bg-[#FFF0F4] border-[#F06292] text-[#F06292]'
@@ -363,10 +511,10 @@ export default function App() {
         <div>
           <div className="flex items-center justify-between mb-8">
             <div className="flex items-center space-x-2.5">
-              <div className={`w-10 h-10 rounded-full border-2 flex items-center justify-center ${
-                isDark ? 'bg-[#291730] border-[#F472B6] text-[#F472B6]' : 'bg-[#FFF0F4] border-[#1E2360] text-[#F06292]'
+              <div className={`w-10 h-10 rounded-full border-2 overflow-hidden flex items-center justify-center shrink-0 ${
+                isDark ? 'bg-[#291730] border-[#F472B6]' : 'bg-[#FFF0F4] border-[#1E2360]'
               }`}>
-                <Wifi className="w-5 h-5 stroke-[2.5]" />
+                <img src="/logo.png" alt="LANscape" className="w-full h-full object-cover" />
               </div>
               <h2 className={`text-xl font-black ${isDark ? 'text-white' : 'text-[#1E2360]'}`}>LANscape</h2>
             </div>
@@ -416,10 +564,10 @@ export default function App() {
         <div>
           {/* Logo Brand */}
           <div className="relative flex flex-col items-center justify-center mb-8 pt-2">
-            <div className={`relative w-16 h-16 rounded-full border-[3px] flex items-center justify-center mb-2 shadow-sm ${
-              isDark ? 'bg-[#171C3F] border-[#38BDF8] text-[#38BDF8]' : 'bg-[#FFFDF2] border-[#1E2360] text-[#1E2360]'
+            <div className={`relative w-20 h-20 rounded-full border-[3px] overflow-hidden flex items-center justify-center mb-2 shadow-sm ${
+              isDark ? 'bg-[#171C3F] border-[#38BDF8]' : 'bg-[#FFFDF2] border-[#1E2360]'
             }`}>
-              <Wifi className="w-8 h-8 stroke-[2.5]" />
+              <img src="/logo.png" alt="LANscape Logo" className="w-full h-full object-cover" />
             </div>
             <h1 className={`text-2xl font-black tracking-tight ${isDark ? 'text-white' : 'text-[#1E2360]'}`}>LANscape</h1>
             <span className="text-xs font-bold text-[#F06292] tracking-wider uppercase">Local Network</span>
@@ -514,9 +662,14 @@ export default function App() {
 
             {/* Stadium Pill Title Banner */}
             <div className="relative inline-block my-1 max-w-full">
-              <div className={`relative border-[3px] px-5 sm:px-7 py-2 sm:py-2.5 rounded-full shadow-sm flex items-center space-x-2 sm:space-x-3 ${
+              <div className={`relative border-[3px] px-4 sm:px-6 py-2 sm:py-2.5 rounded-full shadow-sm flex items-center space-x-2.5 sm:space-x-3 ${
                 isDark ? 'bg-[#171C3F] border-[#2A3266]' : 'bg-[#FFFDF0] border-[#1E2360]'
               }`}>
+                <div className={`w-8 h-8 rounded-full border-2 overflow-hidden shrink-0 ${
+                  isDark ? 'border-[#38BDF8]' : 'border-[#1E2360]'
+                }`}>
+                  <img src="/logo.png" alt="LANscape Logo" className="w-full h-full object-cover" />
+                </div>
                 <div className="flex items-center space-x-1.5 sm:space-x-2 text-xl sm:text-2xl md:text-3xl font-black uppercase tracking-tight truncate">
                   <span className={isDark ? 'text-white' : 'text-[#1E2360]'}>HOME</span>
                   <span className="text-[#F06292]">NETWORK</span>
@@ -552,11 +705,11 @@ export default function App() {
               </span>
             </div>
 
-            {/* User Profile Avatar */}
-            <div className={`w-11 h-11 rounded-full border-[2.5px] flex items-center justify-center font-black shadow-sm ${
-              isDark ? 'bg-[#291730] border-[#F472B6] text-[#F472B6]' : 'bg-[#FFF0F4] border-[#1E2360] text-[#F06292]'
+            {/* User Profile Avatar with Logo */}
+            <div className={`w-11 h-11 rounded-full border-[2.5px] overflow-hidden flex items-center justify-center font-black shadow-sm ${
+              isDark ? 'bg-[#291730] border-[#F472B6]' : 'bg-[#FFF0F4] border-[#1E2360]'
             }`}>
-              <User className="w-5 h-5 stroke-[2.5]" />
+              <img src="/logo.png" alt="Profile" className="w-full h-full object-cover" />
             </div>
           </div>
         </header>
@@ -739,6 +892,22 @@ export default function App() {
                       </div>
                     )}
 
+                    {/* Reset Pins Layout Button */}
+                    {Object.keys(customLocations).length > 0 && (
+                      <button
+                        onClick={resetAllLocations}
+                        className={`flex items-center space-x-1.5 px-2.5 py-1.5 rounded-full text-xs font-black uppercase border-2 transition-all active:scale-95 ${
+                          isDark
+                            ? 'bg-[#171C3F] text-[#94A3B8] border-[#2A3266] hover:text-white hover:border-[#38BDF8]'
+                            : 'bg-white text-[#1E2360] border-[#1E2360] hover:bg-[#FFF0F4]'
+                        }`}
+                        title="Reset all devices to default room layout"
+                      >
+                        <RotateCcw className="w-3.5 h-3.5" />
+                        <span className="hidden sm:inline">Reset Pins</span>
+                      </button>
+                    )}
+
                     {/* Live Status Legend */}
                     <div className={`hidden sm:flex items-center space-x-3 text-[10px] font-black uppercase px-3 py-1.5 rounded-full border-2 ${
                       isDark ? 'bg-[#171C3F] border-[#2A3266] text-[#E2E8F0]' : 'bg-white border-[#1E2360] text-[#1E2360]'
@@ -769,8 +938,13 @@ export default function App() {
                   isDark ? 'bg-[#0A0D23] border-[#2A3266]' : 'bg-[#FFF8EB] border-[#1E2360]'
                 }`}>
                   <svg
+                    ref={svgRef}
                     viewBox="0 0 850 500"
-                    className="w-full h-full select-none"
+                    className={`w-full h-full select-none ${draggingIp ? 'cursor-grabbing' : ''}`}
+                    style={{ touchAction: 'none' }}
+                    onPointerMove={handlePointerMoveSvg}
+                    onPointerUp={handlePointerUpSvg}
+                    onPointerLeave={handlePointerUpSvg}
                   >
                     {/* SVG Definitions for Wi-Fi Signal Heatmaps */}
                     <defs>
@@ -923,20 +1097,77 @@ export default function App() {
                       </g>
                     </g>
 
-                    {/* STRICTLY DYNAMIC CLIENT PINS (Online & Disconnected) */}
-                    {mappedDevicePins.map(({ device, slot, type }) => {
+                    {/* Dynamic Dragging Guide Line from Router to Dragged Device */}
+                    {draggingIp && (() => {
+                      const pin = mappedDevicePins.find(p => p.device.ip_address === draggingIp);
+                      if (!pin) return null;
+                      const midX = (330 + pin.x) / 2;
+                      const midY = (230 + pin.y) / 2;
+                      return (
+                        <g className="pointer-events-none select-none">
+                          <line
+                            x1="330"
+                            y1="230"
+                            x2={pin.x}
+                            y2={pin.y}
+                            stroke={pin.sig.color}
+                            strokeWidth="2.5"
+                            strokeDasharray="5 4"
+                            opacity="0.9"
+                          />
+                          <circle cx={pin.x} cy={pin.y} r="32" fill="none" stroke={pin.sig.color} strokeWidth="2" strokeDasharray="4 3" opacity="0.7" />
+                          {/* Distance & Signal HUD pill at midpoint */}
+                          <g transform={`translate(${midX}, ${midY})`}>
+                            <rect
+                              x="-42"
+                              y="-11"
+                              width="84"
+                              height="22"
+                              rx="11"
+                              fill={isDark ? "#0A0D23" : "#FFFFFF"}
+                              stroke={pin.sig.color}
+                              strokeWidth="2"
+                            />
+                            <text
+                              x="0"
+                              y="4"
+                              textAnchor="middle"
+                              fill={pin.sig.color}
+                              fontSize="9"
+                              fontWeight="900"
+                            >
+                              {pin.sig.distMeters}m • {pin.sig.rssi} dBm
+                            </text>
+                          </g>
+                        </g>
+                      );
+                    })()}
+
+                    {/* STRICTLY DYNAMIC CLIENT PINS (Online, Disconnected & Draggable) */}
+                    {mappedDevicePins.map(({ device, x, y, type, sig, isCustom, roomName }) => {
                       const isOnline = device.last_status === 'online';
-                      const sig = getSlotSignal(slot.id, heatmapBand === '5ghz');
+                      const isBeingDragged = draggingIp === device.ip_address;
 
                       return (
                         <g
                           key={device.id || device.ip_address}
-                          transform={`translate(${slot.x}, ${slot.y})`}
-                          className="cursor-pointer group"
-                          onClick={() => setSelectedDevice(device)}
+                          transform={`translate(${x}, ${y})`}
+                          className={`group ${isBeingDragged ? 'cursor-grabbing opacity-90' : 'cursor-grab'}`}
                         >
-                          {/* Stationary invisible hit target to completely prevent hover oscillation */}
-                          <circle cx="0" cy="8" r="42" fill="transparent" pointerEvents="all" />
+                          {/* Stationary invisible hit target with pointer capture for buttery smooth dragging */}
+                          <circle
+                            cx="0"
+                            cy="8"
+                            r="44"
+                            fill="transparent"
+                            pointerEvents="all"
+                            className="cursor-grab active:cursor-grabbing"
+                            onPointerDown={(e) => handlePointerDownDevice(e, device.ip_address, device)}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setSelectedDevice(device);
+                            }}
+                          />
 
                           {/* Visual element with origin-centered scaling on group hover */}
                           <g
@@ -947,8 +1178,8 @@ export default function App() {
                             <path
                               d="M-22,-20 L22,-20 A16,16 0 0,1 38,-4 L38,12 A16,16 0 0,1 22,28 L6,28 L0,36 L-6,28 L-22,28 A16,16 0 0,1 -38,12 L-38,-4 A16,16 0 0,1 -22,-20 Z"
                               fill={isOnline ? (isDark ? "#171C3F" : "#FFFFFF") : (isDark ? "#12152E" : "#F4F5F7")}
-                              stroke={isOnline ? (isDark ? "#818CF8" : "#1E2360") : (isDark ? "#475569" : "#94A3B8")}
-                              strokeWidth="2.5"
+                              stroke={isCustom ? "#F06292" : isOnline ? (isDark ? "#818CF8" : "#1E2360") : (isDark ? "#475569" : "#94A3B8")}
+                              strokeWidth={isCustom ? "3" : "2.5"}
                               strokeDasharray={isOnline ? "none" : "4 3"}
                               opacity={isOnline ? 1 : 0.85}
                             />
@@ -1003,18 +1234,18 @@ export default function App() {
                             {showHeatmap && isOnline && (
                               <g transform="translate(0, -25)">
                                 <rect
-                                  x="-22"
-                                  y="-7.5"
-                                  width="44"
-                                  height="15"
-                                  rx="7.5"
+                                  x="-24"
+                                  y="-8"
+                                  width="48"
+                                  height="16"
+                                  rx="8"
                                   fill={isDark ? "#0E132D" : "#FFFFFF"}
                                   stroke={sig.color}
                                   strokeWidth="1.5"
                                 />
                                 <text
                                   x="0"
-                                  y="3"
+                                  y="3.5"
                                   textAnchor="middle"
                                   fill={sig.color}
                                   fontSize="8"
@@ -1079,73 +1310,149 @@ export default function App() {
                   </svg>
                 </div>
 
-                {/* Selected Device Banner with Wi-Fi Signal Diagnostics */}
+                {/* Interactive Drag & Proximity Hint Banner directly under Floor Plan */}
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1.5 mt-2 px-1 text-[11px] font-bold">
+                  <span className={`flex items-center space-x-1.5 ${isDark ? 'text-[#94A3B8]' : 'text-[#64748B]'}`}>
+                    <Move className="w-3.5 h-3.5 text-[#F06292]" />
+                    <span>Drag device bubbles anywhere &bull; Proximity to router dynamically recalibrates signal dBm</span>
+                  </span>
+                  {Object.keys(customLocations).length > 0 && (
+                    <span className={`text-[10px] font-black uppercase px-2 py-0.5 rounded-full border self-start sm:self-auto ${
+                      isDark ? 'bg-[#171C3F] border-[#38BDF8] text-[#38BDF8]' : 'bg-[#FFF0F4] border-[#F06292] text-[#F06292]'
+                    }`}>
+                      {Object.keys(customLocations).length} Custom Location{Object.keys(customLocations).length > 1 ? 's' : ''}
+                    </span>
+                  )}
+                </div>
+
+                {/* Selected Device Banner with Wi-Fi Diagnostics & Spatial Relocation */}
                 {selectedDevice && (() => {
                   const devPin = mappedDevicePins.find(p => p.device.ip_address === selectedDevice.ip_address);
-                  const sig = devPin ? getSlotSignal(devPin.slot.id, heatmapBand === '5ghz') : null;
+                  const sig = devPin?.sig;
                   const isOnline = selectedDevice.last_status === 'online';
 
                   return (
-                    <div className={`mt-4 border-2 rounded-2xl p-3 sm:p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs font-bold animate-in fade-in ${
+                    <div className={`mt-3 border-2 rounded-2xl p-3 sm:p-3.5 flex flex-col gap-3 text-xs font-bold animate-in fade-in ${
                       isOnline
                         ? isDark ? 'bg-[#171C3F] border-[#38BDF8]' : 'bg-[#FFF0F4] border-[#1E2360]'
                         : 'bg-[#FFF0F0] border-[#DC2626]'
                     }`}>
-                      <div className="flex items-center space-x-2.5 sm:space-x-3 overflow-hidden">
-                        <div className={`w-9 h-9 rounded-full text-white flex items-center justify-center font-bold shrink-0 ${
-                          isOnline ? (isDark ? 'bg-[#38BDF8] text-[#0B0E21]' : 'bg-[#F06292]') : 'bg-[#DC2626]'
-                        }`}>
-                          <Monitor className="w-4 h-4 stroke-[2.5]" />
-                        </div>
-                        <div className="truncate">
-                          <div className={`text-xs sm:text-sm font-black truncate ${isDark && isOnline ? 'text-white' : 'text-[#1E2360]'}`}>
-                            {selectedDevice.friendly_name || selectedDevice.hostname || selectedDevice.ip_address}
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                        <div className="flex items-center space-x-2.5 sm:space-x-3 overflow-hidden">
+                          <div className={`w-9 h-9 rounded-full text-white flex items-center justify-center font-bold shrink-0 ${
+                            isOnline ? (isDark ? 'bg-[#38BDF8] text-[#0B0E21]' : 'bg-[#F06292]') : 'bg-[#DC2626]'
+                          }`}>
+                            <Monitor className="w-4 h-4 stroke-[2.5]" />
                           </div>
-                          <div className={`font-mono text-[10px] sm:text-[11px] truncate ${
+                          <div className="truncate">
+                            <div className={`text-xs sm:text-sm font-black truncate ${isDark && isOnline ? 'text-white' : 'text-[#1E2360]'}`}>
+                              {selectedDevice.friendly_name || selectedDevice.hostname || selectedDevice.ip_address}
+                            </div>
+                            <div className={`font-mono text-[10px] sm:text-[11px] truncate ${
+                              isOnline
+                                ? isDark ? 'text-[#38BDF8]' : 'text-[#F06292]'
+                                : 'text-[#DC2626]'
+                            }`}>
+                              {selectedDevice.ip_address} &bull; MAC: {maskMac(selectedDevice.mac_address)}
+                              {isOnline && sig && (
+                                <span className="ml-2 font-sans font-bold">
+                                  &bull; {devPin?.roomName} ({sig.distMeters}m) &bull; {sig.rssi} dBm ({sig.quality})
+                                </span>
+                              )}
+                              {!isOnline && ` &bull; Last seen: ${new Date(selectedDevice.last_seen).toLocaleTimeString()}`}
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center space-x-2 shrink-0 self-end sm:self-auto">
+                          {isOnline && sig && (
+                            <div className={`hidden md:flex items-center space-x-1 px-2.5 py-1 rounded-full border text-[10px] font-black ${
+                              isDark ? 'bg-[#111533] border-[#2A3266] text-[#38BDF8]' : 'bg-white border-[#1E2360] text-[#1E2360]'
+                            }`}>
+                              <Signal className="w-3 h-3 text-[#10B981]" />
+                              <span>{sig.percent}%</span>
+                            </div>
+                          )}
+
+                          <span className={`font-black px-2.5 sm:px-3 py-1 rounded-full text-[9px] sm:text-[10px] uppercase ${
                             isOnline
-                              ? isDark ? 'text-[#38BDF8]' : 'text-[#F06292]'
-                              : 'text-[#DC2626]'
+                              ? isDark ? 'bg-[#10B981] text-white' : 'bg-[#1E2360] text-white'
+                              : 'bg-[#DC2626] text-white animate-pulse'
                           }`}>
-                            {selectedDevice.ip_address} &bull; MAC: {maskMac(selectedDevice.mac_address)}
-                            {isOnline && sig && (
-                              <span className="ml-2 font-sans font-bold">
-                                &bull; Signal: {sig.rssi} dBm ({sig.quality}) &bull; {heatmapBand.toUpperCase()}
-                              </span>
-                            )}
-                            {!isOnline && ` &bull; Last seen: ${new Date(selectedDevice.last_seen).toLocaleTimeString()}`}
-                          </div>
+                            {isOnline ? 'ONLINE' : 'DISCONNECTED'}
+                          </span>
+
+                          <button
+                            onClick={() => setSelectedDevice(null)}
+                            className={`w-6 h-6 rounded-full border flex items-center justify-center font-black transition ${
+                              isDark
+                                ? 'bg-[#1A2048] border-[#2A3266] text-white hover:bg-[#F06292]'
+                                : 'bg-white border-[#1E2360] text-[#1E2360] hover:bg-[#F06292] hover:text-white'
+                            }`}
+                          >
+                            ✕
+                          </button>
                         </div>
                       </div>
 
-                      <div className="flex items-center space-x-2 shrink-0 self-end sm:self-auto">
-                        {isOnline && sig && (
-                          <div className={`hidden md:flex items-center space-x-1 px-2.5 py-1 rounded-full border text-[10px] font-black ${
-                            isDark ? 'bg-[#111533] border-[#2A3266] text-[#38BDF8]' : 'bg-white border-[#1E2360] text-[#1E2360]'
-                          }`}>
-                            <Signal className="w-3 h-3 text-[#10B981]" />
-                            <span>{sig.percent}%</span>
-                          </div>
-                        )}
-
-                        <span className={`font-black px-2.5 sm:px-3 py-1 rounded-full text-[9px] sm:text-[10px] uppercase ${
-                          isOnline
-                            ? isDark ? 'bg-[#10B981] text-white' : 'bg-[#1E2360] text-white'
-                            : 'bg-[#DC2626] text-white animate-pulse'
+                      {/* Quick Room Placement & Distance Calibration Controls */}
+                      {selectedDevice.ip_address !== '192.168.1.1' && devPin && (
+                        <div className={`pt-2.5 border-t flex flex-col lg:flex-row lg:items-center justify-between gap-3 ${
+                          isDark ? 'border-[#2A3266]' : 'border-[#1E2360]/20'
                         }`}>
-                          {isOnline ? 'ONLINE' : 'DISCONNECTED'}
-                        </span>
+                          {/* Room Buttons */}
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <span className="text-[10px] font-black uppercase tracking-wider text-[#F06292] flex items-center gap-1 mr-1">
+                              <MapPin className="w-3 h-3" /> Move:
+                            </span>
+                            {PRESET_ROOMS.map(r => (
+                              <button
+                                key={r.id}
+                                onClick={() => updateDeviceLocation(selectedDevice.ip_address, r.x, r.y)}
+                                className={`px-2 py-0.5 rounded-full text-[10px] font-bold border transition ${
+                                  devPin.roomName === r.name
+                                    ? 'bg-[#F06292] text-white border-[#F06292]'
+                                    : isDark
+                                      ? 'bg-[#111533] border-[#2A3266] text-[#CBD5E1] hover:text-white'
+                                      : 'bg-white border-[#1E2360] text-[#1E2360] hover:bg-[#FFF0F4]'
+                                }`}
+                              >
+                                {r.icon} {r.name}
+                              </button>
+                            ))}
+                            {devPin.isCustom && (
+                              <button
+                                onClick={() => resetDeviceLocation(selectedDevice.ip_address)}
+                                className={`px-2 py-0.5 rounded-full text-[10px] font-bold border transition ${
+                                  isDark ? 'border-red-900 text-red-400 hover:bg-red-950' : 'border-red-300 text-red-600 hover:bg-red-50'
+                                }`}
+                                title="Reset to default slot"
+                              >
+                                Reset
+                              </button>
+                            )}
+                          </div>
 
-                        <button
-                          onClick={() => setSelectedDevice(null)}
-                          className={`w-6 h-6 rounded-full border flex items-center justify-center font-black transition ${
-                            isDark
-                              ? 'bg-[#1A2048] border-[#2A3266] text-white hover:bg-[#F06292]'
-                              : 'bg-white border-[#1E2360] text-[#1E2360] hover:bg-[#F06292] hover:text-white'
-                          }`}
-                        >
-                          ✕
-                        </button>
-                      </div>
+                          {/* Distance to Router Slider */}
+                          <div className="flex items-center space-x-2 shrink-0">
+                            <span className="text-[10px] font-black uppercase text-gray-400 shrink-0">
+                              Proximity:
+                            </span>
+                            <input
+                              type="range"
+                              min="30"
+                              max="390"
+                              value={devPin.sig.distPx}
+                              onChange={(e) => handleDistanceSlider(selectedDevice.ip_address, Number(e.target.value))}
+                              className="w-24 sm:w-28 h-1.5 bg-gray-200 dark:bg-gray-700 rounded-lg appearance-none cursor-pointer accent-[#F06292]"
+                              title="Drag closer/farther from router"
+                            />
+                            <span className="text-[10px] font-mono font-bold shrink-0 text-[#10B981]">
+                              {devPin.sig.distMeters}m ({devPin.sig.rssi} dBm)
+                            </span>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   );
                 })()}

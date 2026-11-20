@@ -9,7 +9,8 @@ LANscape continuously observes your local area network (LAN), tracks router reac
 ## ✨ Features
 
 - 🗺️ **Interactive Home Floor-Plan Map**: Visual representation of devices mapped to rooms (living room, bedrooms, TV lounge, workspace) with real-time status pulses.
-- 📡 **Dual-Band Wi-Fi Heatmap**: Live signal propagation overlay for **2.4 GHz** and **5 GHz** bands featuring simulated physical wall attenuation and live `-XX dBm` RSSI badges.
+- 🎯 **Drag-and-Drop Device Relocation**: Click and drag any device bubble across the floor plan with dynamic guidelines, distance readouts, and one-click room placement presets.
+- 📡 **Dual-Band Wi-Fi Heatmap & Live Proximity Physics**: Live signal propagation overlay for **2.4 GHz** and **5 GHz** bands. Moving a device closer to or farther from the router automatically recalibrates signal strength (`-XX dBm`), quality bars, and wall attenuation in real time.
 - 📈 **Real-Time Latency & Gateway Telemetry**: Continuous gateway ping monitoring, packet loss calculation, and host transfer meters.
 - 🔍 **Local Device Discovery**: Discovers active subnet nodes using ARP scanning and subnet sweeps, with automatic deduplication of DHCP lease changes.
 - 🌙 **Midnight Retro Dark Mode**: Instant switch between high-contrast retro pop styling and a midnight navy dark theme with local storage persistence.
