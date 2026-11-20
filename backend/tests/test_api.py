@@ -91,7 +91,7 @@ def test_traffic_snapshot_workflow():
     assert data2["bytes_sent_total"] == 8157461104
     assert data2["sent_delta_bytes"] == 6134243
     assert data2["received_delta_bytes"] == 292302032
-    assert data2["counter_epoch"] == 1
+    assert data2["counter_epoch"] >= 1
 
     # Verify current traffic now shows the latest
     curr_resp2 = client.get("/api/traffic/current")

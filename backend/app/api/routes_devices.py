@@ -1,4 +1,5 @@
 import socket
+import concurrent.futures
 from datetime import datetime
 from typing import List
 from fastapi import APIRouter, Depends
@@ -7,7 +8,8 @@ from sqlalchemy.orm import Session
 from app.db.database import get_db
 from app.db.models import Device
 from app.schemas.device import DeviceResponse, DeviceScanResponse
-from app.collectors.local_discovery import discover_local_devices
+from app.collectors.local_discovery import discover_local_devices, parse_windows_arp
+from app.collectors.latency import ping_host
 
 router = APIRouter(prefix="/devices", tags=["devices"])
 
@@ -32,70 +34,111 @@ def get_local_host_device():
     }
 
 
-def sync_devices(db: Session, sweep: bool = False):
+def check_and_sync_devices(db: Session, sweep: bool = False) -> List[Device]:
+    """
+    Checks the local network state.
+    - Discovers active devices via ARP and optional subnet sweep
+    - Actively verifies reachability for all known devices in parallel
+    - Explicitly sets last_status to 'online' or 'disconnected'
+    """
     discovered = discover_local_devices(sweep_first=sweep)
+    discovered_map = {d["ip_address"]: d for d in discovered}
 
-    # Always ensure the local host machine is registered
-    host_device = get_local_host_device()
-    if not any(d["ip_address"] == host_device["ip_address"] for d in discovered):
-        discovered.insert(0, host_device)
+    # Host laptop is always registered
+    host = get_local_host_device()
+    discovered_map[host["ip_address"]] = host
 
     now = datetime.utcnow()
-    response_items = []
-    for d in discovered:
-        device = db.query(Device).filter(Device.ip_address == d["ip_address"]).first()
-        friendly = d.get("friendly_name")
-        if device:
-            device.mac_address = d.get("mac_address") or device.mac_address
-            device.hostname = d.get("hostname") or device.hostname
-            if friendly and not device.friendly_name:
-                device.friendly_name = friendly
-            device.last_seen = now
-            device.last_status = "online"
-            device.source = d.get("source", "local_arp")
+    all_db_devices = db.query(Device).all()
+    all_db_map = {dev.ip_address: dev for dev in all_db_devices}
+
+    # Ensure there is strictly ONLY ONE host laptop in the entire system.
+    # Purge any old host entries from when the laptop had a previous DHCP IP.
+    stale_hosts = [
+        dev for dev in all_db_devices
+        if (dev.source in ("host_laptop", "previous_host") or dev.mac_address == "host:local:nic" or (dev.friendly_name and "Work Laptop" in dev.friendly_name))
+        and dev.ip_address != host["ip_address"]
+    ]
+    for stale in stale_hosts:
+        db.delete(stale)
+        all_db_devices.remove(stale)
+        all_db_map.pop(stale.ip_address, None)
+    if stale_hosts:
+        db.commit()
+
+    # 1. Update/Add all discovered devices into the database
+    for ip, d in discovered_map.items():
+        dev = all_db_map.get(ip)
+        if dev:
+            if d.get("mac_address"):
+                dev.mac_address = d.get("mac_address")
+            if d.get("hostname"):
+                dev.hostname = d.get("hostname")
+            if d.get("friendly_name") and not dev.friendly_name:
+                dev.friendly_name = d.get("friendly_name")
+            if ip == host["ip_address"]:
+                dev.source = "host_laptop"
+                dev.friendly_name = "Work Laptop"
         else:
-            device = Device(
-                ip_address=d["ip_address"],
+            dev = Device(
+                ip_address=ip,
                 mac_address=d.get("mac_address"),
                 hostname=d.get("hostname"),
-                friendly_name=friendly,
+                friendly_name=d.get("friendly_name"),
                 source=d.get("source", "local_arp"),
                 first_seen=now,
                 last_seen=now,
                 last_status="online"
             )
-            db.add(device)
-        db.commit()
-        db.refresh(device)
-        response_items.append(device)
+            db.add(dev)
+            all_db_devices.append(dev)
+            all_db_map[ip] = dev
 
-    return response_items
+    # 2. Parallel verify reachability for all known devices
+    def verify_device(dev: Device):
+        if dev.ip_address == host["ip_address"]:
+            return dev, True
+        if dev.ip_address == "192.168.1.1":
+            ok, _ = ping_host("192.168.1.1", timeout_ms=500)
+            return dev, ok
+        # Quick ping test with short timeout (350ms)
+        ok, _ = ping_host(dev.ip_address, timeout_ms=350)
+        return dev, ok
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        results = list(executor.map(verify_device, all_db_devices))
+
+    for dev, is_online in results:
+        if is_online:
+            dev.last_seen = now
+            dev.last_status = "online"
+        else:
+            dev.last_status = "disconnected"
+
+    db.commit()
+    return db.query(Device).all()
 
 
 @router.get("", response_model=List[DeviceResponse])
 def get_devices(db: Session = Depends(get_db)):
     """
-    Returns latest known device list. If database has fewer than 2 devices,
-    triggers a background scan to populate.
+    Returns latest known device list with real-time reachability status.
     """
-    devices = db.query(Device).all()
-    if len(devices) <= 1:
-        devices = sync_devices(db, sweep=True)
-    return devices
+    return check_and_sync_devices(db, sweep=False)
 
 
 @router.post("/scan", response_model=DeviceScanResponse)
 def scan_devices(sweep: bool = True, db: Session = Depends(get_db)):
     """
-    Runs a dynamic ARP cache scan with subnet sweep (default True)
-    so all active mobile devices and smart TVs are detected.
+    Runs a dynamic scan with subnet sweep (default True)
+    and updates device statuses (online vs disconnected).
     """
     now = datetime.utcnow()
-    response_items = sync_devices(db, sweep=sweep)
+    devices = check_and_sync_devices(db, sweep=sweep)
 
     return {
-        "source": "local_arp_sweep" if sweep else "local_arp_cache",
+        "source": "local_arp_sweep" if sweep else "local_arp_scan",
         "observed_at": now,
-        "device_count": len(response_items),
-        "devices": response_items
+        "device_count": len(devices),
+        "devices": devices
     }
