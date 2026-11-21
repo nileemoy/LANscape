@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from app.db.database import get_db
 from app.db.models import Device
 from app.schemas.device import DeviceResponse, DeviceScanResponse
-from app.collectors.local_discovery import discover_local_devices, parse_windows_arp
+from app.collectors.local_discovery import discover_local_devices, parse_windows_arp, get_default_gateway_ip
 from app.collectors.latency import ping_host
 
 router = APIRouter(prefix="/devices", tags=["devices"])
@@ -21,14 +21,14 @@ def get_local_host_device():
         host_ip = s.getsockname()[0]
         s.close()
     except Exception:
-        host_ip = "192.168.1.2"
+        host_ip = "127.0.0.1"
 
     hostname = socket.gethostname()
     return {
         "ip_address": host_ip,
         "mac_address": "host:local:nic",
         "hostname": hostname,
-        "friendly_name": "Work Laptop",
+        "friendly_name": "Host Computer",
         "source": "host_laptop",
         "last_status": "online"
     }
@@ -95,11 +95,13 @@ def check_and_sync_devices(db: Session, sweep: bool = False) -> List[Device]:
             all_db_map[ip] = dev
 
     # 2. Parallel verify reachability for all known devices
+    gw_ip = get_default_gateway_ip()
+
     def verify_device(dev: Device):
         if dev.ip_address == host["ip_address"]:
             return dev, True
-        if dev.ip_address == "192.168.1.1":
-            ok, _ = ping_host("192.168.1.1", timeout_ms=500)
+        if dev.ip_address == gw_ip:
+            ok, _ = ping_host(gw_ip, timeout_ms=500)
             return dev, ok
         # Quick ping test with short timeout (350ms)
         ok, _ = ping_host(dev.ip_address, timeout_ms=350)

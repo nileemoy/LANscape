@@ -21,7 +21,8 @@ def test_router_status_endpoint():
     data = response.json()
     assert "reachable" in data
     assert "router_ip" in data
-    assert data["router_ip"] == "192.168.1.1"
+    assert isinstance(data["router_ip"], str)
+    assert len(data["router_ip"].split(".")) == 4
 
 
 def test_latency_current_endpoint():

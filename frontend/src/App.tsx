@@ -504,7 +504,7 @@ export default function App() {
     if (d.source === 'host_laptop' || text.includes('laptop') || text.includes('windows') || text.includes('pc') || text.includes('desktop')) {
       return 'laptop';
     }
-    if (text.includes('tv') || text.includes('samsung') || text.includes('lg') || text.includes('sony') || d.ip_address === '192.168.1.6') {
+    if (text.includes('tv') || text.includes('samsung') || text.includes('lg') || text.includes('sony')) {
       return 'tv';
     }
     if (text.includes('phone') || text.includes('oppo') || text.includes('nothing') || text.includes('pixel') || text.includes('iphone') || text.includes('android')) {
@@ -534,7 +534,7 @@ export default function App() {
   })();
 
   // Filter out router gateway from client pins
-  const clientDevices = deduplicatedDevices.filter(d => d.ip_address !== '192.168.1.1');
+  const clientDevices = deduplicatedDevices.filter(d => d.ip_address !== (routerStatus?.router_ip || '192.168.1.1'));
   const onlineClientCount = clientDevices.filter(d => d.last_status === 'online').length;
   const disconnectedClientCount = clientDevices.filter(d => d.last_status !== 'online').length;
   const totalOnlineCount = onlineClientCount + (routerStatus?.reachable ? 1 : 0);
@@ -591,29 +591,41 @@ export default function App() {
 
   const displayDownloadMbps = !routerStatus?.reachable
     ? '0.00'
-    : hostTraffic?.download_mbps && hostTraffic.download_mbps > 0
+    : hostTraffic && typeof hostTraffic.download_mbps === 'number'
     ? hostTraffic.download_mbps.toFixed(2)
-    : '75.43';
+    : '0.00';
 
   const displayUploadMbps = !routerStatus?.reachable
     ? '0.00'
-    : hostTraffic?.upload_mbps && hostTraffic.upload_mbps > 0
+    : hostTraffic && typeof hostTraffic.upload_mbps === 'number'
     ? hostTraffic.upload_mbps.toFixed(2)
-    : '1.58';
+    : '0.00';
 
   const connectedCount = deduplicatedDevices.length;
 
-  const totalUsageGb = currentWanSample
-    ? ((currentWanSample.bytes_received_total + currentWanSample.bytes_sent_total) / 1073741824).toFixed(2)
-    : '117.18';
+  // Real live data: prefer router WAN snapshot when available; fallback to real host network counters from psutil
+  const rawRecvBytes = currentWanSample
+    ? currentWanSample.bytes_received_total
+    : hostTraffic
+    ? hostTraffic.bytes_recv_total
+    : 0;
 
-  const downloadUsageGb = currentWanSample
-    ? (currentWanSample.bytes_received_total / 1073741824).toFixed(2)
-    : '109.18';
+  const rawSentBytes = currentWanSample
+    ? currentWanSample.bytes_sent_total
+    : hostTraffic
+    ? hostTraffic.bytes_sent_total
+    : 0;
 
-  const uploadUsageGb = currentWanSample
-    ? (currentWanSample.bytes_sent_total / 1073741824).toFixed(2)
-    : '8.00';
+  const rawTotalBytes = rawRecvBytes + rawSentBytes;
+
+  const totalUsageGb = (rawTotalBytes / 1073741824).toFixed(2);
+  const downloadUsageGb = (rawRecvBytes / 1073741824).toFixed(2);
+  const uploadUsageGb = (rawSentBytes / 1073741824).toFixed(2);
+
+  const downloadPercent = rawTotalBytes > 0
+    ? Math.min(100, Math.max(1, Math.round((rawRecvBytes / rawTotalBytes) * 100)))
+    : 50;
+  const uploadPercent = 100 - downloadPercent;
 
   const handleNavClick = (tab: 'dashboard' | 'devices' | 'usage' | 'settings') => {
     setActiveNav(tab);
@@ -738,8 +750,8 @@ export default function App() {
         <div className={`rounded-2xl border-2 p-3.5 text-white ${
           isDark ? 'bg-[#15284F] border-[#38BDF8]' : 'bg-[#5B9BD5] border-[#1E2360]'
         }`}>
-          <span className="text-[10px] font-extrabold uppercase text-[#FFF7C2] block">Zyxel PMG5617</span>
-          <span className="text-xs font-black">192.168.1.1</span>
+          <span className="text-[10px] font-extrabold uppercase text-[#FFF7C2] block">Router Gateway</span>
+          <span className="text-xs font-black">{routerStatus?.router_ip || 'Detecting...'}</span>
         </div>
       </div>
 
@@ -830,9 +842,11 @@ export default function App() {
             }}
           />
           <div className="relative z-10">
-            <span className="text-[11px] font-extrabold uppercase tracking-wider block text-[#FFF7C2]">GPON ONT</span>
-            <div className="text-sm font-black mt-0.5">Zyxel PMG5617</div>
-            <p className="text-[11px] opacity-90 mt-1">Gateway: 192.168.1.1</p>
+            <span className="text-[11px] font-extrabold uppercase tracking-wider block text-[#FFF7C2]">
+              {routerStatus?.reachable ? 'Online Gateway' : 'Router Gateway'}
+            </span>
+            <div className="text-sm font-black mt-0.5">Router Gateway</div>
+            <p className="text-[11px] opacity-90 mt-1">Gateway: {routerStatus?.router_ip || 'Detecting...'}</p>
           </div>
         </div>
       </aside>
@@ -843,7 +857,7 @@ export default function App() {
         <header className="px-4 sm:px-6 lg:px-8 pt-6 sm:pt-8 pb-4 flex flex-col md:flex-row md:items-center justify-between gap-4">
           <div>
             <p className="text-xs font-bold text-[#F06292] uppercase tracking-wider mb-1">
-              {getGreeting()}, Nileemoy!
+              {getGreeting()}!
             </p>
 
             {/* Stadium Pill Title Banner */}
@@ -906,9 +920,9 @@ export default function App() {
             <div className="flex items-center space-x-3">
               <span className="text-2xl">⚠️</span>
               <div>
-                <h4 className="font-black text-[#DC2626] text-sm uppercase">Router Gateway (192.168.1.1) Unreachable</h4>
+                <h4 className="font-black text-[#DC2626] text-sm uppercase">Router Gateway ({routerStatus?.router_ip || 'Default Gateway'}) Unreachable</h4>
                 <p className="text-xs font-bold text-[#991B1B]">
-                  Your Zyxel ONT is turned off or disconnected. LANscape remains accessible because it runs on your laptop&apos;s loopback (127.0.0.1).
+                  Your router/gateway is offline or unreachable. LANscape remains accessible because it runs on your local machine.
                 </p>
               </div>
             </div>
@@ -1442,7 +1456,7 @@ export default function App() {
                         </>
                       )}
 
-                      {/* Zyxel Router Gateway Icon with draggable hit target */}
+                      {/* Router Gateway Icon with draggable hit target */}
                       <g
                         className="cursor-pointer group"
                       >
@@ -1459,10 +1473,10 @@ export default function App() {
                             e.stopPropagation();
                             setSelectedDevice({
                               id: 1,
-                              ip_address: '192.168.1.1',
-                              mac_address: '14:33:75:03:f5:95',
-                              hostname: 'Zyxel-PMG5617-R20B',
-                              friendly_name: 'Airtel GPON ONT',
+                              ip_address: routerStatus?.router_ip || 'Default Gateway',
+                              mac_address: 'gateway:nic',
+                              hostname: 'Gateway Router',
+                              friendly_name: 'Main Router / Gateway',
                               source: 'gateway_router',
                               first_seen: new Date().toISOString(),
                               last_seen: new Date().toISOString(),
@@ -1693,7 +1707,7 @@ export default function App() {
                               fontSize="9"
                               fontWeight="800"
                             >
-                              {device.ip_address.replace('192.168.1.', '.')} {!isOnline ? '(OFF)' : ''}
+                              {device.ip_address.replace(/^(192\.168\.\d+\.|10\.\d+\.\d+\.|172\.(1[6-9]|2\d|3[01])\.\d+\.)/, '.')} {!isOnline ? '(OFF)' : ''}
                             </text>
                           </g>
                         </g>
@@ -1929,20 +1943,20 @@ export default function App() {
                     </div>
                   </div>
 
-                  {/* Growth Stadium Pill */}
+                  {/* Growth / Telemetry Status Stadium Pill */}
                   <div className={`inline-flex items-center space-x-1.5 border-2 px-3.5 py-1 rounded-full text-xs font-black mb-5 sm:mb-6 shadow-sm ${
                     isDark ? 'bg-[#291730] text-[#F472B6] border-[#F472B6]' : 'bg-[#FFF0F4] text-[#F06292] border-[#1E2360]'
                   }`}>
                     <ArrowUp className="w-3.5 h-3.5 stroke-[3]" />
-                    <span>+2.6% from last month</span>
+                    <span>{currentWanSample ? 'WAN Interface Data' : 'Live Host Interface Data'}</span>
                   </div>
 
-                  {/* Candy Dual Progress Bar */}
+                  {/* Candy Dual Progress Bar (Proportion of Download vs Upload) */}
                   <div className={`w-full h-5 border-2 rounded-full overflow-hidden flex mb-5 sm:mb-6 p-0.5 ${
                     isDark ? 'bg-[#1A1A3C] border-[#2A3266]' : 'bg-[#FFF0F4] border-[#1E2360]'
                   }`}>
-                    <div className={`${isDark ? 'bg-[#38BDF8]' : 'bg-[#1E2360]'} h-full rounded-l-full`} style={{ width: '92%' }}></div>
-                    <div className="bg-[#F06292] h-full rounded-r-full" style={{ width: '8%' }}></div>
+                    <div className={`${isDark ? 'bg-[#38BDF8]' : 'bg-[#1E2360]'} h-full rounded-l-full transition-all duration-300`} style={{ width: `${downloadPercent}%` }}></div>
+                    <div className="bg-[#F06292] h-full rounded-r-full transition-all duration-300" style={{ width: `${uploadPercent}%` }}></div>
                   </div>
 
                   {/* Breakdown */}
@@ -1968,11 +1982,11 @@ export default function App() {
                 <div className={`pt-6 border-t-2 text-xs font-bold flex items-center justify-between mt-4 lg:mt-0 ${
                   isDark ? 'border-[#2A3266] text-slate-400' : 'border-[#1E2360]/20 text-[#1E2360]/80'
                 }`}>
-                  <span>Zyxel PMG5617 PPPoE</span>
+                  <span>{currentWanSample ? 'Router WAN Counters' : 'Host Interface (psutil)'}</span>
                   <span className={`border px-2 py-0.5 rounded-full text-[10px] font-black ${
                     isDark ? 'bg-[#0E2824] text-[#10B981] border-[#10B981]' : 'bg-[#E8F8F0] text-[#1E2360] border-[#1E2360]'
                   }`}>
-                    VERIFIED
+                    {currentWanSample ? 'WAN VERIFIED' : 'LIVE HOST'}
                   </span>
                 </div>
               </div>
@@ -2117,19 +2131,23 @@ export default function App() {
                   isDark ? 'bg-[#221832] border-[#2A3266]' : 'bg-[#FFF0F4] border-[#1E2360]'
                 }`}>
                   <h4 className={`font-black uppercase text-sm mb-3 ${isDark ? 'text-white' : 'text-[#1E2360]'}`}>
-                    Zyxel Router WAN Counters
+                    {currentWanSample ? 'Router WAN Counters' : 'Host Cumulative Usage'}
                   </h4>
                   <div className="grid grid-cols-2 gap-3 sm:gap-4">
                     <div className={`p-3.5 sm:p-4 rounded-xl border-2 ${
                       isDark ? 'bg-[#111533] border-[#2A3266]' : 'bg-white border-[#1E2360]'
                     }`}>
-                      <span className={`text-[10px] font-black uppercase block ${isDark ? 'text-slate-400' : 'text-[#1E2360]/70'}`}>Observed Download</span>
+                      <span className={`text-[10px] font-black uppercase block ${isDark ? 'text-slate-400' : 'text-[#1E2360]/70'}`}>
+                        {currentWanSample ? 'Observed Download' : 'Host Total Download'}
+                      </span>
                       <span className={`text-xl sm:text-2xl font-black ${isDark ? 'text-white' : 'text-[#1E2360]'}`}>{downloadUsageGb} GB</span>
                     </div>
                     <div className={`p-3.5 sm:p-4 rounded-xl border-2 ${
                       isDark ? 'bg-[#111533] border-[#2A3266]' : 'bg-white border-[#1E2360]'
                     }`}>
-                      <span className={`text-[10px] font-black uppercase block ${isDark ? 'text-slate-400' : 'text-[#1E2360]/70'}`}>Observed Upload</span>
+                      <span className={`text-[10px] font-black uppercase block ${isDark ? 'text-slate-400' : 'text-[#1E2360]/70'}`}>
+                        {currentWanSample ? 'Observed Upload' : 'Host Total Upload'}
+                      </span>
                       <span className="text-xl sm:text-2xl font-black text-[#F06292]">{uploadUsageGb} GB</span>
                     </div>
                   </div>
@@ -2153,8 +2171,8 @@ export default function App() {
                   isDark ? 'bg-[#111533] border-[#2A3266]' : 'bg-white border-[#1E2360]'
                 }`}>
                   <div>
-                    <div className={`uppercase font-black ${isDark ? 'text-white' : 'text-[#1E2360]'}`}>Router Gateway (Zyxel PMG5617)</div>
-                    <div className="font-mono text-[#F06292] mt-0.5">192.168.1.1</div>
+                    <div className={`uppercase font-black ${isDark ? 'text-white' : 'text-[#1E2360]'}`}>Router Gateway</div>
+                    <div className="font-mono text-[#F06292] mt-0.5">{routerStatus?.router_ip || '192.168.1.1'}</div>
                   </div>
                   <span className={`border-2 px-3 py-1 rounded-full font-black ${
                     isDark ? 'bg-[#0E2824] text-[#10B981] border-[#10B981]' : 'bg-[#E8F8F0] text-[#1E2360] border-[#1E2360]'
